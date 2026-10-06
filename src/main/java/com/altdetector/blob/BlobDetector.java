@@ -477,15 +477,6 @@ public class BlobDetector implements Listener {
         list.add(claimerStr);
         this.statClaimsFound++;
         this.store.saveBlobClaims(this.blobClaims);
-
-        String ownerName = this.store.displayName(ownerStr);
-        String claimerName = claimerPlayer.getName();
-        String msg = TextFormat.AQUA + "[BlobCache] " + TextFormat.YELLOW + claimerName
-                + TextFormat.WHITE + " 的客户端命中了 " + TextFormat.YELLOW + ownerName
-                + TextFormat.WHITE + " 的指纹（共享同一设备客户端，疑似小号）";
-        for (Player p : plugin.getServer().getOnlinePlayers().values()) {
-            if (p.hasPermission("altdetector.notify")) p.sendMessage(msg);
-        }
     }
 
     /** /alias 输出用：与目标玩家在 Blob 维度双向关联的账号（它命中了谁 + 谁命中了它）。 */

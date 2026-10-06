@@ -1,0 +1,11 @@
+com/altdetector/protocol/ClientCacheMissResponsePacket.class
+com/altdetector/pack/PackDetector.class
+com/altdetector/protocol/ClientCacheBlobStatusPacket$Cursor.class
+com/altdetector/command/AliasCommand.class
+com/altdetector/util/XxHash64.class
+com/altdetector/store/PlayerStore.class
+com/altdetector/AltDetector.class
+com/altdetector/pack/FingerprintPack.class
+com/altdetector/blob/BlobDetector.class
+com/altdetector/command/AliasCommand$AliasOutputRequest.class
+com/altdetector/protocol/ClientCacheBlobStatusPacket.class
