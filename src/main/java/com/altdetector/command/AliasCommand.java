@@ -11,7 +11,6 @@ import com.altdetector.store.PlayerStore;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -45,7 +44,7 @@ public class AliasCommand extends Command {
 
     public AliasCommand(AltDetector plugin, PlayerStore store, BlobDetector blobDetector) {
         super("alias", "查询玩家的小号关联记录", "/alias <玩家名/uuid/xuid>", new String[]{"al"});
-        this.setPermission("");
+        this.setPermission("altdetector.alias"); // plugin.yml 中 default: op，op 默认拥有
         this.plugin = plugin;
         this.store = store;
         this.blobDetector = blobDetector;
@@ -65,6 +64,7 @@ public class AliasCommand extends Command {
 
     @Override
     public boolean execute(CommandSender sender, String label, String[] args) {
+        if (!this.testPermission(sender)) return true;
         if (args.length < 1) {
             sender.sendMessage(TextFormat.YELLOW + "用法:");
             sender.sendMessage(TextFormat.GRAY + "  /alias <玩家名/uuid/xuid>");
@@ -139,28 +139,13 @@ public class AliasCommand extends Command {
         String display = store.getDisplayIdentifier(targetUuid);
         boolean spoof = store.isSpoofFlagged(targetUuid);
 
-        Set<String> deviceMatches = new LinkedHashSet<>();
-        Set<String> selfMatches = new LinkedHashSet<>();
-        Set<String> clientMatches = new LinkedHashSet<>();
-        Set<String> packMatches = new LinkedHashSet<>();
-        Set<String> blobRelated = blobDetector.getBlobRelated(targetUuid);
-
-        Map<String, Map<String, List<String>>> ids = store.getIdentifiers();
-
-        for (Map.Entry<String, List<String>> e : ids.getOrDefault("device", new LinkedHashMap<>()).entrySet())
-            if (e.getValue().contains(targetUuid))
-                for (String other : e.getValue()) if (!other.equals(targetUuid)) deviceMatches.add(other);
-
-        for (Map.Entry<String, List<String>> e : ids.getOrDefault("selfSigned", new LinkedHashMap<>()).entrySet())
-            if (e.getValue().contains(targetUuid))
-                for (String other : e.getValue()) if (!other.equals(targetUuid)) selfMatches.add(other);
-
-        for (Map.Entry<String, List<String>> e : ids.getOrDefault("clientRandom", new LinkedHashMap<>()).entrySet())
-            if (e.getValue().contains(targetUuid))
-                for (String other : e.getValue()) if (!other.equals(targetUuid)) clientMatches.add(other);
-
-        for (String c : store.getPackClaims().getOrDefault(targetUuid, new ArrayList<>()))
-            if (!c.equals(targetUuid)) packMatches.add(c);
+        // 与开发者 API（AltDetector#getRelatedAccounts）共用同一查询入口，保证 /alias 输出与 API 结果一致
+        Map<String, Set<String>> related = plugin.getRelatedByDimension(targetUuid);
+        Set<String> deviceMatches = related.get("device");
+        Set<String> selfMatches = related.get("selfSigned");
+        Set<String> clientMatches = related.get("clientRandom");
+        Set<String> packMatches = related.get("pack");
+        Set<String> blobRelated = related.get("blob");
 
         sender.sendMessage("§l--" + targetName + "'s accounts (" + display + ")--");
 

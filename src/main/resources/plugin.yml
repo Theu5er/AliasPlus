@@ -1,7 +1,11 @@
 name: Alias+
 main: com.altdetector.AltDetector
-version: "1.0.0"
+version: "1.0.1"
 api: ["1.0.0"]
 author: u5er
 load: POSTWORLD
 description: Advanced Alt Detection Plugin
+permissions:
+  altdetector.alias:
+    description: 使用 /alias 查询玩家的小号关联记录
+    default: op
