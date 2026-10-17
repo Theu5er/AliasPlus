@@ -4,7 +4,21 @@ A Minecraft Bedrock Edition alt-account detection plugin built on the Nukkit-MOT
 
 **Advantages:**
 
-Unlike other anti-alt plugins on the market, we not only support basic checks like DeviceId, SelfSignedId(doesn't work in newer versions), and ClientRandomId, but also have developed detection based on resource pack cache and BlobCache—less common methods designed specifically to catch spoofers. We also provide a query and punishment API, with support for delayed punishments.
+🔍
+**Unique Detection**
+We have more detection methods than similar plugins, so the average spoofer is no longer unsolvable.
+
+🎯
+**High Accuracy**
+Detection does not rely on non-unique evidence like IP; results can be used for bans directly.
+
+🤫
+**Silent Detection**
+Detection is almost completely silent and supports delayed punishments—cheaters have no idea why they got banned.
+
+🔗
+**Developer API**
+We provide query and punishment APIs, allowing you to ban all alt accounts with one call.
 
 **Usage:**
 
@@ -41,7 +55,7 @@ All options are created with defaults on first launch; everything below is optio
 
 This project is a vibe-coding-assisted technical demo. It may contain bugs—do not use it on a production server.
 
-The ResPackCache and BlobCache output can potentially be spoofed, but when necessary, you can simply ban all accounts returned, since they can only be alt accounts or hackers.
+The ResPackCache and BlobCache output can potentially be spoofed, but when necessary, you can simply ban all accounts returned, since they can only be alt accounts or cheaters.
 
 ## Developer API
 
