@@ -129,6 +129,25 @@ public class PunishManager {
         } catch (Exception e) {
             plugin.getLogger().warning("执行惩罚命令失败 (" + p.uuid + "): " + e);
         }
+        // 打上已惩罚标记：之后该账号的指纹被新账号命中时，可自动惩罚新账号
+        store.markPunished(p.uuid);
+    }
+
+    /**
+     * 该账号是否已被惩罚过：本插件执行过惩罚命令（Punished 标记），或
+     * 服务器封禁列表里已有其当前玩家名（兼容管理员手动 /ban 的账号）。
+     */
+    public boolean isPunished(String playerUuid) {
+        if (playerUuid == null || playerUuid.isEmpty()) return false;
+        String uuid = playerUuid.toLowerCase();
+        if (store.isPunishedFlagged(uuid)) return true;
+        String name = store.displayName(uuid);
+        if (name == null || name.isEmpty() || name.equals(uuid)) return false;
+        try {
+            return plugin.getServer().getNameBans().isBanned(name);
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /** 延迟区间随机，单位换算为 tick；配置非法（min>max / 负数）时自动修正。 */

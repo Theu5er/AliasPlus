@@ -37,14 +37,14 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Consumer;
 
 /**
  * Client Blob Cache 维度检测。
  *
  * <p>基岩客户端内置持久 blob 缓存（内容寻址、跨账号共享）：为每个账号生成唯一 biome
- * 指纹 blob；对在线玩家发起探测（cacheEnabled 区块引用 4 个共享负段 blob + 若干指纹
- * blob），客户端 0x87 响应中 hit 的指纹即代表该设备缓存过对应账号——换号命中即关联。
+ * 指纹 blob；玩家进服后自动发起探测（cacheEnabled 区块：4 个共享负段 blob 作结构承载，
+ * 其余 subchunk 槽与 biome 槽合并携带多个指纹 blob，单区块最多 21 个），客户端 0x87
+ * 响应中 hit 的指纹即代表该设备缓存过对应账号——换号命中即关联。
  *
  * <p>共享负段 blob 同时是探测区块的结构承载（客户端只处理含已知负段的 cacheEnabled 区块），
  * 其 hit 仅说明设备玩过本服，与小号判断无关，静默跳过。
@@ -54,7 +54,6 @@ public class BlobDetector implements Listener {
     private static final int MIN_BLOB_PROTOCOL = ProtocolInfo.v1_18_0;
     private static final int OVERWORLD_BIOME_SECTIONS = 24;
     private static final int NEGATIVE_SUB_CHUNKS = 4;
-    private static final int PROBE_SUB_CHUNK_COUNT = NEGATIVE_SUB_CHUNKS;
 
     private static final byte[][] NEG_BLOBS = new byte[NEGATIVE_SUB_CHUNKS][];
     private static final long[] NEG_BLOB_HASHES = new long[NEGATIVE_SUB_CHUNKS];
@@ -68,6 +67,14 @@ public class BlobDetector implements Listener {
 
     private static final int[] BIOME_POOL = {1, 2, 3, 4, 5};
     private static final int PROBE_CHUNK_BASE = 200_000;
+
+    /**
+     * 每个探测区块的 subchunk 槽数（主世界满额 24：4 个负段 + 20 个指纹）。
+     * blobIds 数组 = subChunkCount 个 subchunk blob + 1 个 biome blob，
+     * 因此单个区块最多可探测 {@link #FPS_PER_CHUNK} = 21 个指纹。
+     */
+    private static final int PROBE_SUBCHUNK_SLOTS = 24;
+    private static final int FPS_PER_CHUNK = PROBE_SUBCHUNK_SLOTS - NEGATIVE_SUB_CHUNKS + 1;
 
     private final AltDetector plugin;
     private final PlayerStore store;
@@ -83,6 +90,8 @@ public class BlobDetector implements Listener {
     private final Set<UUID> cacheStatusSent = ConcurrentHashMap.newKeySet();
     private final Set<UUID> fullScanPending = ConcurrentHashMap.newKeySet();
     private final Map<UUID, TaskHandler> scanTimeouts = new HashMap<>();
+    /** 扫描中命中已惩罚账号指纹的账号：扫描结束（finishScan）后统一惩罚。 */
+    private final Set<String> autoPunishPending = new HashSet<>();
 
     private long statProbesSent;
     private long statHits;
@@ -90,16 +99,9 @@ public class BlobDetector implements Listener {
     private long statClaimsFound;
     private long statSkippedUnsupported;
 
-    /** 完整扫描结束回调（/alias 的挂起输出在其上执行）。由 AliasCommand 注册。 */
-    private Consumer<UUID> scanFinishedCallback;
-
     public BlobDetector(AltDetector plugin, PlayerStore store) {
         this.plugin = plugin;
         this.store = store;
-    }
-
-    public void setScanFinishedCallback(Consumer<UUID> callback) {
-        this.scanFinishedCallback = callback;
     }
 
     /* ================================================================== */
@@ -159,11 +161,15 @@ public class BlobDetector implements Listener {
         if (early != null) {
             this.cacheSupported.put(player.getUniqueId(), early);
         }
-        // 进服不探测：只确保该账号的指纹记录存在，供以后的 /alias 完整扫描引用
+        // 确保该账号的指纹记录存在
         try {
             this.ensureBlob(player.getUniqueId().toString());
         } catch (Exception ignored) {
         }
+
+        // 进服立即探测。scanPlayer 内部会自行校验 spawned、cache 支持与所在维度，
+        // 条件未就绪时自动重试，条件不满足时静默结束。
+        this.startFullScan(player);
     }
 
     @EventHandler
@@ -173,9 +179,8 @@ public class BlobDetector implements Listener {
         pendingChunks.remove(uuid);
         cacheSupported.remove(uuid);
         cacheStatusSent.remove(uuid);
-        this.fullScanPending.remove(uuid);
-        TaskHandler timeout = this.scanTimeouts.remove(uuid);
-        if (timeout != null) timeout.cancel();
+        // 走 finishScan 正规收尾：清 fullScanPending、取消超时任务、结算自动惩罚
+        this.finishScan(uuid);
     }
 
     @EventHandler
@@ -218,7 +223,7 @@ public class BlobDetector implements Listener {
     /*  完整扫描（/alias 对在线玩家触发）                                    */
     /* ================================================================== */
 
-    /** 手动触发的完整 BlobCache 扫描：/alias <在线玩家> 时调用，探测全部已知指纹（含其自身）。静默执行。 */
+    /** 发起完整 BlobCache 扫描（探测全部已知指纹，含其自身）。进服自动触发。静默执行。 */
     public void startFullScan(Player player) {
         UUID uuid = player.getUniqueId();
         if (!this.fullScanPending.add(uuid)) return;
@@ -228,11 +233,19 @@ public class BlobDetector implements Listener {
     private void scanPlayer(Player player, int attempt) {
         UUID uuid = player.getUniqueId();
 
-        if (!player.isConnected() || !player.spawned) {
+        if (!player.isConnected()) {
             this.finishScan(uuid);
             return;
         }
-        if (player.protocol < MIN_BLOB_PROTOCOL) {
+        if (!player.spawned && attempt < 10) {
+            // join 事件可能早于 spawn 完成：等待后重试
+            plugin.getServer().getScheduler().scheduleDelayedTask(plugin, () -> {
+                if (player.isConnected()) this.scanPlayer(player, attempt + 1);
+                else this.finishScan(uuid);
+            }, 20);
+            return;
+        }
+        if (!player.spawned || player.protocol < MIN_BLOB_PROTOCOL) {
             this.statSkippedUnsupported++;
             this.finishScan(uuid);
             return;
@@ -309,9 +322,10 @@ public class BlobDetector implements Listener {
         TaskHandler timeout = this.scanTimeouts.remove(uuid);
         if (timeout != null) timeout.cancel();
 
-        // 扫描完成：若本次 /alias 挂起了输出请求，由回调延迟一拍执行，
-        // 确保展示的是本次扫描后的最新 BlobCache 关联
-        if (this.scanFinishedCallback != null) this.scanFinishedCallback.accept(uuid);
+        // 检测结束：统一处理扫描期间登记的自动惩罚（此时全部 claim 已落盘，
+        // punish 收集关联账号时不会漏掉本轮扫描的后发现的命中）
+        for (String claimer : this.autoPunishPending) plugin.punish(claimer, false);
+        this.autoPunishPending.clear();
     }
 
     /* ================================================================== */
@@ -328,24 +342,33 @@ public class BlobDetector implements Listener {
         Set<Long> chunks = new HashSet<>();
         for (long h : NEG_BLOB_HASHES) pending.add(h);
 
-        for (int i = 0; i < ids.size(); i++) {
-            long fp = ids.get(i);
-            int cx = bx + i;
+        // 合并探测：一个 cacheEnabled 区块可引用多个 blob（blobIds = subChunkCount 个
+        // subchunk blob + 1 个 biome blob）。前 4 个 subchunk 槽固定放共享负段 blob
+        // （客户端只处理含已知负段的区块），其余 subchunk 槽与 biome 槽依次放指纹，
+        // 单区块最多探测 FPS_PER_CHUNK 个指纹，N 个指纹只需 ceil(N / FPS_PER_CHUNK) 个包。
+        int chunkIndex = 0;
+        for (int i = 0; i < ids.size(); i += FPS_PER_CHUNK) {
+            List<Long> batch = ids.subList(i, Math.min(ids.size(), i + FPS_PER_CHUNK));
+            int cx = bx + chunkIndex;
             int cz = bz;
+            chunkIndex++;
             try {
+                int fpsInSubchunks = Math.max(0, batch.size() - 1);
                 LevelChunkPacket pk = new LevelChunkPacket();
                 pk.chunkX = cx;
                 pk.chunkZ = cz;
                 pk.dimension = Level.DIMENSION_OVERWORLD;
-                pk.subChunkCount = PROBE_SUB_CHUNK_COUNT;
+                pk.subChunkCount = NEGATIVE_SUB_CHUNKS + fpsInSubchunks;
                 pk.cacheEnabled = true;
-                long[] blobIds = new long[PROBE_SUB_CHUNK_COUNT + 1];
+                long[] blobIds = new long[pk.subChunkCount + 1];
                 System.arraycopy(NEG_BLOB_HASHES, 0, blobIds, 0, NEGATIVE_SUB_CHUNKS);
-                blobIds[PROBE_SUB_CHUNK_COUNT] = fp;
+                for (int j = 0; j < fpsInSubchunks; j++)
+                    blobIds[NEGATIVE_SUB_CHUNKS + j] = batch.get(j);
+                blobIds[blobIds.length - 1] = batch.get(batch.size() - 1); // biome 槽
                 pk.blobIds = blobIds;
                 pk.data = new byte[]{0};
                 player.dataPacket(pk);
-                pending.add(fp);
+                for (long fp : batch) pending.add(fp);
                 chunks.add(chunkKey(cx, cz));
                 this.statProbesSent++;
             } catch (Exception e) {
@@ -477,14 +500,24 @@ public class BlobDetector implements Listener {
         list.add(claimerStr);
         this.statClaimsFound++;
         this.store.saveBlobClaims(this.blobClaims);
+        // 命中已惩罚账号的指纹（同设备）：先登记，扫描结束（finishScan）后统一惩罚，
+        // 确保惩罚时本次检测的全部 claim 已落盘
+        if (plugin.isPunished(ownerStr)) this.autoPunishPending.add(claimerStr);
     }
 
-    /** /alias 输出用：与目标玩家在 Blob 维度双向关联的账号（它命中了谁 + 谁命中了它）。 */
+    /**
+     * /alias 输出用：与目标玩家在 Blob 维度关联的账号——<b>单向判定</b>（谁命中了它的指纹），
+     * 与资源包缓存一致。只展示"哪些账号的设备缓存过目标账号的指纹 blob"；
+     * 反方向（目标命中了谁的 blob）仅在 strictmode=false 时额外展示——0x87 的 hitIds
+     * 由客户端说了算，双向展示会让冒充者得以把受害者挂到自己名下（punish 连坐定向误封）。
+     */
     public Set<String> getBlobRelated(String targetUuid) {
         Set<String> related = new HashSet<>();
-        for (Map.Entry<String, List<String>> e : this.blobClaims.entrySet()) {
-            if (e.getValue().contains(targetUuid) && !e.getKey().equals(targetUuid))
-                related.add(e.getKey());
+        if (!plugin.strictMode()) {
+            for (Map.Entry<String, List<String>> e : this.blobClaims.entrySet()) {
+                if (e.getValue().contains(targetUuid) && !e.getKey().equals(targetUuid))
+                    related.add(e.getKey());
+            }
         }
         for (String c : this.blobClaims.getOrDefault(targetUuid, new ArrayList<>())) {
             if (!c.equals(targetUuid)) related.add(c);

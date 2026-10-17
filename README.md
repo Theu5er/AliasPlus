@@ -4,7 +4,7 @@ A Minecraft Bedrock Edition alt-account detection plugin built on the Nukkit-MOT
 
 **Advantages:**
 
-Unlike other anti-alt plugins on the market, we not only support basic checks like DID, SSID, and CID, but also have developed detection based on resource pack cache and BlobCache—less common methods designed specifically to catch spoofers. We also provide a query and punishment API, with support for delayed punishments.
+Unlike other anti-alt plugins on the market, we not only support basic checks like DeviceId, SelfSignedId(doesn't work in newer versions), and ClientRandomId, but also have developed detection based on resource pack cache and BlobCache—less common methods designed specifically to catch spoofers. We also provide a query and punishment API, with support for delayed punishments.
 
 **Usage:**
 
@@ -17,19 +17,31 @@ Enable `force-resources` in the `server.properties` file.
 Example output:
 
 ```
-player's accounts (uuid: b1033201-7292-3cac-9bf0-2059ac139adc)--
-DeviceId: player1
-SelfSignedId: player1
-ClientRandomId: player1
-ResPackCache: player1
-BlobCache: player1
+--ExampleAcc's accounts (xuid: 123456)--
+DeviceId: ExampleAcc
+ClientRandomId: ExampleAcc
+ResPackCache: ExampleAcc
+BlobCache: ExampleAcc
 ```
+
+## Configuration (`config.yml`)
+
+All options are created with defaults on first launch; everything below is optional.
+
+| Option | Default | Description |
+|---|---|---|
+| `packcache-enabled` | `true` | Enable the resource pack cache detection dimension |
+| `blobcache-enabled` | `true` | Enable the blob cache detection dimension |
+| `strictmode` | `true` | Association direction. `true` = one-way (only show who cached/hit the target's fingerprints); `false` = two-way (also show whose fingerprints the target cached/hit). Two-way mode allows spoofed hits to frame innocent players via punishment chaining. |
+| `punish-command` | `ban %player% Alt account detected` | Punishment command template, executed as console. Placeholders: `%player%` = player name, `%uuid%` = player uuid |
+| `punish-delay-min` | `5` | Minimum random delay for delayed bans (seconds, rolled independently per account) |
+| `punish-delay-max` | `30` | Maximum random delay for delayed bans (seconds, rolled independently per account) |
 
 **Notes:**
 
-This project was originally intended as a technical demonstration. It has not undergone comprehensive or rigorous testing and may contain bugs—please do not use it on a production server.
+This project is a vibe-coding-assisted technical demo. It may contain bugs—do not use it on a production server.
 
-The ResPackCache output can potentially be spoofed, but when necessary, you can simply ban all accounts returned, since they can only be alt accounts or cheaters.
+The ResPackCache and BlobCache output can potentially be spoofed, but when necessary, you can simply ban all accounts returned, since they can only be alt accounts or hackers.
 
 ## Developer API
 

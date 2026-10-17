@@ -82,6 +82,7 @@ public class PlayerStore {
         info.put("name", "");
         info.put("aliases", new ArrayList<>());
         info.put("ResourcePackSpoof", false);
+        info.put("Punished", false);
         info.put("ids", new LinkedHashMap<>());
         info.put("pack", new LinkedHashMap<>());
         info.put("blob", new LinkedHashMap<>());
@@ -188,6 +189,7 @@ public class PlayerStore {
             if (!info.containsKey("name")) { info.put("name", ""); changed = true; }
             if (!info.containsKey("aliases")) { info.put("aliases", new ArrayList<>()); changed = true; }
             if (!info.containsKey("ResourcePackSpoof")) { info.put("ResourcePackSpoof", false); changed = true; }
+            if (!info.containsKey("Punished")) { info.put("Punished", false); changed = true; }
             if (!info.containsKey("ids")) { info.put("ids", new LinkedHashMap<>()); changed = true; }
             if (!info.containsKey("pack")) { info.put("pack", new LinkedHashMap<>()); changed = true; }
             if (!info.containsKey("blob")) { info.put("blob", new LinkedHashMap<>()); changed = true; }
@@ -265,6 +267,7 @@ public class PlayerStore {
             aliases.add(playerName);
             info.put("aliases", aliases);
             info.put("ResourcePackSpoof", false);
+            info.put("Punished", false);
             info.put("ids", new LinkedHashMap<>());
             info.put("pack", new LinkedHashMap<>());
             info.put("blob", new LinkedHashMap<>());
@@ -278,6 +281,7 @@ public class PlayerStore {
             if (aliasesObj instanceof List) for (Object o : (List<?>) aliasesObj) aliases.add(String.valueOf(o));
             if (!aliases.contains(playerName)) { aliases.add(playerName); info.put("aliases", aliases); changed = true; }
             if (!info.containsKey("ResourcePackSpoof")) { info.put("ResourcePackSpoof", false); changed = true; }
+            if (!info.containsKey("Punished")) { info.put("Punished", false); changed = true; }
         }
 
         // 收养同名空壳记录：首次检测（可能发生在未认证连接上）留下的壳——pack 已分配给该
@@ -310,22 +314,23 @@ public class PlayerStore {
         }
     }
 
-    public void addPackClaim(String claimerUuid, String ownerUuid) {
-        if (ownerUuid == null) return;
+    /** @return true = 本次新增的 claim（已存在则返回 false，不重复写盘） */
+    public boolean addPackClaim(String claimerUuid, String ownerUuid) {
+        if (ownerUuid == null) return false;
         playersConfig.reload();
         Map<String, Map<String, Object>> players = getPlayers();
         Map<String, Object> info = players.get(ownerUuid);
-        if (info == null) return;
+        if (info == null) return false;
         Map<String, Object> pack = resolveNested(info, "pack");
         List<String> list = new ArrayList<>();
         Object cb = pack.get("claimed_by");
         if (cb instanceof List) for (Object o : (List<Object>) cb) list.add(String.valueOf(o));
-        if (!list.contains(claimerUuid)) {
-            list.add(claimerUuid);
-            pack.put("claimed_by", list);
-            playersConfig.set("players", players);
-            playersConfig.save();
-        }
+        if (list.contains(claimerUuid)) return false;
+        list.add(claimerUuid);
+        pack.put("claimed_by", list);
+        playersConfig.set("players", players);
+        playersConfig.save();
+        return true;
     }
 
     /* ================================================================== */
@@ -360,6 +365,37 @@ public class PlayerStore {
     }
 
     /* ================================================================== */
+    /*  Punished 标记（该账号已被本插件惩罚过）                              */
+    /* ================================================================== */
+
+    public boolean isPunishedFlagged(String playerUuid) {
+        Map<String, Object> info = getPlayers().get(playerUuid);
+        if (info == null) return false;
+        Object flag = info.get("Punished");
+        if (flag instanceof Boolean) return (Boolean) flag;
+        return "true".equalsIgnoreCase(String.valueOf(flag));
+    }
+
+    public void markPunished(String playerUuid) {
+        Map<String, Map<String, Object>> players = getPlayers();
+        Map<String, Object> info = players.get(playerUuid);
+        if (info == null) {
+            info = newPlayerRecord();
+            info.put("name", playerUuid);
+            players.put(playerUuid, info);
+        }
+        Object current = info.get("Punished");
+        boolean already = current instanceof Boolean ? (Boolean) current
+                : "true".equalsIgnoreCase(String.valueOf(current));
+        if (already) return;
+        info.put("Punished", true);
+        players.put(playerUuid, info);
+        playersConfig.reload();
+        playersConfig.set("players", players);
+        playersConfig.save();
+    }
+
+    /* ================================================================== */
     /*  空壳记录收养（身份切换兜底，见 PackDetector）                        */
     /* ================================================================== */
 
@@ -375,28 +411,6 @@ public class PlayerStore {
         Object al = info.get("aliases");
         if (al instanceof List && !((List<?>) al).isEmpty()) return false;
         return true;
-    }
-
-    /** 按名字查找可收养的空壳记录的 pack uuid（忽略大小写；只认从未完成登录的壳）。 */
-    public String findAdoptableShellPack(String playerName, String excludeUuid) {
-        if (playerName == null || playerName.isEmpty()) return null;
-        try {
-            for (Map.Entry<String, Map<String, Object>> pe : getPlayers().entrySet()) {
-                if (pe.getKey().equalsIgnoreCase(excludeUuid)) continue;
-                Map<String, Object> info = pe.getValue();
-                if (!isShellRecord(info)) continue;
-                Object nm = info.get("name");
-                if (nm == null || String.valueOf(nm).trim().isEmpty()
-                        || !String.valueOf(nm).equalsIgnoreCase(playerName)) continue;
-                Map<String, Object> pack = asMap(info.get("pack"));
-                if (pack == null) continue;
-                Object pu = pack.get("uuid");
-                if (pu != null && !String.valueOf(pu).isEmpty() && !"null".equalsIgnoreCase(String.valueOf(pu)))
-                    return String.valueOf(pu);
-            }
-        } catch (Exception ignored) {
-        }
-        return null;
     }
 
     /**

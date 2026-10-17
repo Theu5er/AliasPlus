@@ -1,65 +1,30 @@
 package com.altdetector.command;
 
-import cn.nukkit.Player;
 import cn.nukkit.command.Command;
 import cn.nukkit.command.CommandSender;
 import cn.nukkit.utils.TextFormat;
 import com.altdetector.AltDetector;
-import com.altdetector.blob.BlobDetector;
 import com.altdetector.store.PlayerStore;
 
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * /alias（/al）命令：按玩家名 / uuid / xuid 查询全部维度的小号关联结果。
- *
- * <p>目标在线且 blob 检测开启时，先静默发起完整 BlobCache 扫描，扫描完成后再输出，
- * 保证一次查询即可看到最新关联；离线目标直接展示已持久化的结果。
+ * /alias（/al）命令：按玩家名 / uuid / xuid 查询全部维度的小号关联结果，
+ * 直接展示已持久化的数据（BlobCache 由进服自动探测落盘，无需查询时触发）。
  */
 public class AliasCommand extends Command {
 
     private final AltDetector plugin;
     private final PlayerStore store;
-    private final BlobDetector blobDetector;
 
-    /** 在线玩家 /alias 时挂起的输出请求：记录发起者与多目标输出的分隔符状态。 */
-    private final Map<String, AliasOutputRequest> pendingAliasOutput = new ConcurrentHashMap<>();
-
-    /** 在线玩家 /alias 时的输出请求承载：记录发起者与多目标输出的分隔符状态。 */
-    private static final class AliasOutputRequest {
-        final CommandSender sender;
-        final boolean[] first;
-        AliasOutputRequest(CommandSender sender, boolean[] first) {
-            this.sender = sender;
-            this.first = first;
-        }
-    }
-
-    public AliasCommand(AltDetector plugin, PlayerStore store, BlobDetector blobDetector) {
-        super("alias", "查询玩家的小号关联记录", "/alias <玩家名/uuid/xuid>", new String[]{"al"});
+    public AliasCommand(AltDetector plugin, PlayerStore store) {
+        super("alias", "Query a player's linked alt accounts", "/alias <player/uuid/xuid>", new String[]{"al"});
         this.setPermission("altdetector.alias"); // plugin.yml 中 default: op，op 默认拥有
         this.plugin = plugin;
         this.store = store;
-        this.blobDetector = blobDetector;
-        this.blobDetector.setScanFinishedCallback(this::onScanFinished);
-    }
-
-    private void onScanFinished(UUID uuid) {
-        AliasOutputRequest req = pendingAliasOutput.remove(uuid.toString());
-        if (req == null) return;
-        final String targetUuid = uuid.toString();
-        plugin.getServer().getScheduler().scheduleDelayedTask(plugin, () -> {
-            if (!req.first[0]) req.sender.sendMessage("");
-            req.first[0] = false;
-            showAliasResult(req.sender, targetUuid);
-        }, 1);
     }
 
     @Override
@@ -105,28 +70,10 @@ public class AliasCommand extends Command {
 
         store.reload();
 
-        boolean[] first = {true};
+        boolean first = true;
         for (String uuid : targetUuids) {
-            // 玩家在线：先静默发起完整 BlobCache 扫描，扫描完成（finishScan）后再输出结果，
-            // 保证一次 /alias 即可看到最新 BlobCache 关联，无需等命中落盘后二次查询。
-            if (plugin.blobEnabled()) {
-                Player online = null;
-                for (Player p : plugin.getServer().getOnlinePlayers().values()) {
-                    if (p.getUniqueId().toString().equalsIgnoreCase(uuid)) {
-                        online = p;
-                        break;
-                    }
-                }
-                if (online != null && online.spawned) {
-                    pendingAliasOutput.put(uuid, new AliasOutputRequest(sender, first));
-                    blobDetector.startFullScan(online);
-                    continue;
-                }
-            }
-
-            // 离线或扫描未启用：直接展示已持久化的结果
-            if (!first[0]) sender.sendMessage("");
-            first[0] = false;
+            if (!first) sender.sendMessage("");
+            first = false;
             showAliasResult(sender, uuid);
         }
         return true;

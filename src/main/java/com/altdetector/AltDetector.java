@@ -58,8 +58,8 @@ public class AltDetector extends PluginBase implements Listener {
 
         if (!config.exists("packcache-enabled")) config.set("packcache-enabled", true);
         if (!config.exists("blobcache-enabled")) config.set("blobcache-enabled", true);
-        if (!config.exists("blobcache-debug")) config.set("blobcache-debug", false);
-        if (!config.exists("punish-command")) config.set("punish-command", "ban %player% 检测到小号行为");
+        if (!config.exists("strictmode")) config.set("strictmode", true);
+        if (!config.exists("punish-command")) config.set("punish-command", "ban %player% Alt account detected");
         if (!config.exists("punish-delay-min")) config.set("punish-delay-min", 5);
         if (!config.exists("punish-delay-max")) config.set("punish-delay-max", 30);
         config.save();
@@ -84,7 +84,7 @@ public class AltDetector extends PluginBase implements Listener {
         this.getServer().getPluginManager().registerEvents(this.packDetector, this);
         this.getServer().getPluginManager().registerEvents(this.blobDetector, this);
 
-        this.getServer().getCommandMap().register("alias", new AliasCommand(this, store, blobDetector));
+        this.getServer().getCommandMap().register("alias", new AliasCommand(this, store));
     }
 
     @Override
@@ -105,13 +105,22 @@ public class AltDetector extends PluginBase implements Listener {
         return this.config.getBoolean("blobcache-enabled", true);
     }
 
+    /**
+     * 关联判定方向：true（默认）= 单向（只展示"谁缓存/命中了目标的指纹"），
+     * false = 双向（额外展示"目标缓存/命中了谁的指纹"）。
+     * 注意：双向模式下伪造的 claim 会同时出现在两边，punish 连坐可被用于定向误封。
+     */
+    public boolean strictMode() {
+        return this.config.getBoolean("strictmode", true);
+    }
+
     /* ================================================================== */
     /*  惩罚配置（供 PunishManager 查询）                                   */
     /* ================================================================== */
 
     /** punish-command 命令模板，支持 %player% / %uuid% 占位符。 */
     public String getPunishCommand() {
-        String cmd = this.config.getString("punish-command", "ban %player% 检测到小号行为").trim();
+        String cmd = this.config.getString("punish-command", "ban %player% Alt account detected").trim();
         return cmd.isEmpty() ? "ban %player%" : cmd;
     }
 
@@ -149,13 +158,20 @@ public class AltDetector extends PluginBase implements Listener {
             result.put(type, matches);
         }
 
-        // pack：target 的客户端缓存了谁的指纹（claimed_by 以 target 为键）
+        // pack：单向 = 谁缓存了 target 的指纹（claimed_by 以 target 为键）；
+        // strictmode=false 时额外加上反方向（target 缓存了谁的指纹）
         Set<String> packMatches = new LinkedHashSet<>();
         for (String c : store.getPackClaims().getOrDefault(targetUuid, new ArrayList<>()))
             if (!c.equals(targetUuid)) packMatches.add(c);
+        if (!strictMode()) {
+            for (Map.Entry<String, List<String>> e : store.getPackClaims().entrySet()) {
+                if (e.getValue().contains(targetUuid) && !e.getKey().equals(targetUuid))
+                    packMatches.add(e.getKey());
+            }
+        }
         result.put("pack", packMatches);
 
-        // blob：双向关联（它命中了谁 + 谁命中了它）
+        // blob：单向关联（谁命中了它的指纹），与 pack 一致
         result.put("blob", new LinkedHashSet<>(blobDetector.getBlobRelated(targetUuid)));
         return result;
     }
@@ -196,6 +212,14 @@ public class AltDetector extends PluginBase implements Listener {
      */
     public int punish(String playerUuid, boolean delayed) {
         return this.punishManager == null ? 0 : this.punishManager.punish(playerUuid, delayed);
+    }
+
+    /**
+     * 开发者 API：该账号是否已被惩罚过（本插件执行过惩罚命令，或已在服务器封禁列表）。
+     * 供"新账号命中已惩罚账号的指纹时自动惩罚"等扩展逻辑使用。
+     */
+    public boolean isPunished(String playerUuid) {
+        return this.punishManager != null && this.punishManager.isPunished(playerUuid);
     }
 
     /* ================================================================== */
