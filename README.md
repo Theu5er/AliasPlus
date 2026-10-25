@@ -1,5 +1,7 @@
 # Alias+
 
+**English** | [中文](./README.zh.md)
+
 A Minecraft Bedrock Edition alt-account detection plugin built on the Nukkit-MOT core.
 
 **Advantages:**
@@ -20,9 +22,21 @@ Detection is almost completely silent and supports delayed punishments—cheater
 **Developer API**
 We provide query and punishment APIs, allowing you to ban all alt accounts with one call.
 
+## Detection Vectors
+
+Alias+ currently checks:
+
+- `DeviceId`
+- `ClientRandomId`
+- `SelfSignedId` (maybe unavailable now)
+- `NetworkID` (NetherNet clients only)
+- Resource Pack Cache
+- Blob Cache
+
 **Usage:**
 
 Enable `force-resources` in the `server.properties` file.
+Enable `nethernet` in the `nukkit-mot.yml` file.
 
 ```
 /alias <name/uuid/xuid>
@@ -34,6 +48,7 @@ Example output:
 --ExampleAcc's accounts (xuid: 123456)--
 DeviceId: ExampleAcc
 ClientRandomId: ExampleAcc
+NetworkID: ExampleAcc
 ResPackCache: ExampleAcc
 BlobCache: ExampleAcc
 ```
@@ -46,7 +61,8 @@ All options are created with defaults on first launch; everything below is optio
 |---|---|---|
 | `packcache-enabled` | `true` | Enable the resource pack cache detection dimension |
 | `blobcache-enabled` | `true` | Enable the blob cache detection dimension |
-| `strictmode` | `true` | Association direction. `true` = one-way (only show who cached/hit the target's fingerprints); `false` = two-way (also show whose fingerprints the target cached/hit). Two-way mode allows spoofed hits to frame innocent players via punishment chaining. |
+| `networkid-enabled` | `true` | Enable the NetherNet NetworkID detection dimension (NetherNet/WebRTC clients only; RakNet connections carry no NetworkID and are skipped silently) |
+| `strictmode` | `true` | Association direction. `true` = one-way (only show who cached/hit the target's fingerprints); `false` = two-way (also show whose fingerprints the target cached/hit). ⚠️ Two-way mode allows spoofed hits to frame innocent players via punishment chaining. |
 | `punish-command` | `ban %player% Alt account detected` | Punishment command template, executed as console. Placeholders: `%player%` = player name, `%uuid%` = player uuid |
 | `punish-delay-min` | `5` | Minimum random delay for delayed bans (seconds, rolled independently per account) |
 | `punish-delay-max` | `30` | Maximum random delay for delayed bans (seconds, rolled independently per account) |
@@ -55,7 +71,7 @@ All options are created with defaults on first launch; everything below is optio
 
 This project is a vibe-coding-assisted technical demo. It may contain bugs—do not use it on a production server.
 
-The ResPackCache and BlobCache output can potentially be spoofed, but when necessary, you can simply ban all accounts returned, since they can only be alt accounts or cheaters.
+The ResPackCache and BlobCache output can potentially be spoofed, but when necessary, you can simply ban all accounts returned, since they can only be alt accounts or hackers.
 
 ## Developer API
 
@@ -82,5 +98,5 @@ int count = alias.punish(uuid, delayed);
 
 ```java
 Set<String> alts = alias.getRelatedAccounts(uuid);                  // all related alt uuids
-Map<String, Set<String>> byDim = alias.getRelatedByDimension(uuid); // by dimension (device/selfSigned/clientRandom/pack/blob)
+Map<String, Set<String>> byDim = alias.getRelatedByDimension(uuid); // by dimension (device/selfSigned/clientRandom/networkid/pack/blob)
 ```

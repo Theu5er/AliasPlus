@@ -525,6 +525,20 @@ public class BlobDetector implements Listener {
         return related;
     }
 
+    /**
+     * /alias 展示用：目标玩家的"主账号"——目标设备的 blob 缓存命中过的账号
+     * （目标命中了谁的指纹，即它挂在谁名下）。与 {@link #getBlobRelated}（开发者 API
+     * 使用的单向关联）方向相反，仅供 /alias 展示，不影响查询 API 结果。
+     */
+    public Set<String> getBlobOwners(String targetUuid) {
+        Set<String> owners = new HashSet<>();
+        for (Map.Entry<String, List<String>> e : this.blobClaims.entrySet()) {
+            if (e.getValue().contains(targetUuid) && !e.getKey().equals(targetUuid))
+                owners.add(e.getKey());
+        }
+        return owners;
+    }
+
     private List<String> recentOwners(int limit) {
         List<String> all = new ArrayList<>(this.blobIds.keySet());
         if (all.size() <= limit) return all;

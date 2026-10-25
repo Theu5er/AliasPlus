@@ -9,6 +9,7 @@ import cn.nukkit.utils.Config;
 import cn.nukkit.utils.LoginChainData;
 import com.altdetector.blob.BlobDetector;
 import com.altdetector.command.AliasCommand;
+import com.altdetector.net.NetworkIdDetector;
 import com.altdetector.pack.PackDetector;
 import com.altdetector.punish.PunishManager;
 import com.altdetector.store.PlayerStore;
@@ -25,9 +26,11 @@ import java.util.Set;
 /**
  * AltDetector —— 多维度小号关联检测插件。
  *
- * <p>整合三种独立检测维度，任一命中即可关联：
+ * <p>整合四种独立检测维度，任一命中即可关联：
  * <ol>
  *   <li><b>登录标识符</b>：device id / selfSigned id / clientRandom id（同一设备换号必然相同）</li>
+ *   <li><b>NetworkID</b>：NetherNet 传输层对端标识，客户端信令自报、跨会话大概率稳定
+ *       （{@link NetworkIdDetector}）</li>
  *   <li><b>资源包指纹</b>：为每个账号分配唯一资源包 UUID，客户端缓存后换号登录可检测
  *       （{@link PackDetector}）</li>
  *   <li><b>Client Blob Cache</b>：基岩客户端内置持久 blob 缓存（内容寻址、跨账号共享），
@@ -43,6 +46,7 @@ public class AltDetector extends PluginBase implements Listener {
 
     private Config config;
     private PlayerStore store;
+    private NetworkIdDetector networkIdDetector;
     private PackDetector packDetector;
     private BlobDetector blobDetector;
     private PunishManager punishManager;
@@ -58,6 +62,7 @@ public class AltDetector extends PluginBase implements Listener {
 
         if (!config.exists("packcache-enabled")) config.set("packcache-enabled", true);
         if (!config.exists("blobcache-enabled")) config.set("blobcache-enabled", true);
+        if (!config.exists("networkid-enabled")) config.set("networkid-enabled", true);
         if (!config.exists("strictmode")) config.set("strictmode", true);
         if (!config.exists("punish-command")) config.set("punish-command", "ban %player% Alt account detected");
         if (!config.exists("punish-delay-min")) config.set("punish-delay-min", 5);
@@ -75,6 +80,8 @@ public class AltDetector extends PluginBase implements Listener {
         this.blobDetector.loadData();
         this.blobDetector.registerPackets();
 
+        this.networkIdDetector = new NetworkIdDetector(this, store);
+
         this.packDetector = new PackDetector(this, store);
 
         this.punishManager = new PunishManager(this, store);
@@ -83,6 +90,7 @@ public class AltDetector extends PluginBase implements Listener {
         this.getServer().getPluginManager().registerEvents(this, this);
         this.getServer().getPluginManager().registerEvents(this.packDetector, this);
         this.getServer().getPluginManager().registerEvents(this.blobDetector, this);
+        this.getServer().getPluginManager().registerEvents(this.networkIdDetector, this);
 
         this.getServer().getCommandMap().register("alias", new AliasCommand(this, store));
     }
@@ -103,6 +111,14 @@ public class AltDetector extends PluginBase implements Listener {
 
     public boolean blobEnabled() {
         return this.config.getBoolean("blobcache-enabled", true);
+    }
+
+    /**
+     * NetworkID 维度开关：false 时登录不捕获 NetworkID（config.yml 的 networkid-enabled）。
+     * 关闭后 /alias 的 NetworkID 行因无数据自然为空，历史数据保留不清除。
+     */
+    public boolean networkIdEnabled() {
+        return this.config.getBoolean("networkid-enabled", true);
     }
 
     /**
@@ -148,7 +164,9 @@ public class AltDetector extends PluginBase implements Listener {
     public Map<String, Set<String>> getRelatedByDimension(String targetUuid) {
         Map<String, Set<String>> result = new LinkedHashMap<>();
         Map<String, Map<String, List<String>>> ids = store.getIdentifiers();
-        for (String type : new String[]{"device", "selfSigned", "clientRandom"}) {
+        // networkid 与前三者同为"账号自身携带的标识符"（而非可被定向伪造的 claim），
+        // 同值即关联；RakNet 玩家无此维度，数据稀疏属正常
+        for (String type : new String[]{"device", "selfSigned", "clientRandom", "networkid"}) {
             Set<String> matches = new LinkedHashSet<>();
             for (List<String> group : ids.getOrDefault(type, new LinkedHashMap<>()).values()) {
                 if (group.contains(targetUuid)) {
@@ -189,6 +207,15 @@ public class AltDetector extends PluginBase implements Listener {
         if (targetUuid == null || targetUuid.isEmpty()) return all;
         for (Set<String> s : getRelatedByDimension(targetUuid).values()) all.addAll(s);
         return all;
+    }
+
+    /**
+     * /alias 展示辅助：目标玩家的 Blob 维度"主账号"——目标设备的 blob 缓存命中过的
+     * 账号（目标命中了谁的指纹）。与 {@link #getRelatedByDimension} 的 blob 维度方向
+     * 相反，仅供 /alias 展示使用，不影响查询 API 的返回结果。
+     */
+    public Set<String> getBlobMains(String targetUuid) {
+        return this.blobDetector == null ? new LinkedHashSet<>() : this.blobDetector.getBlobOwners(targetUuid);
     }
 
     /**

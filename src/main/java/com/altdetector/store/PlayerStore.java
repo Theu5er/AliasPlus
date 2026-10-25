@@ -15,7 +15,7 @@ import java.util.UUID;
  * <p>记录结构（players 键下，uuid 为键）：
  * <pre>
  * name / aliases / xuid        —— 身份（storePlayerProfile 写入）
- * ids: {device, selfSigned, clientRandom} —— 登录标识符
+ * ids: {device, selfSigned, clientRandom, networkid} —— 登录标识符与 NetherNet NetworkID
  * pack: {uuid, claimed_by}     —— 资源包指纹与命中者
  * blob: {id, claimed_by}       —— Blob 指纹与命中者
  * ResourcePackSpoof            —— 客户端谎报缓存标记

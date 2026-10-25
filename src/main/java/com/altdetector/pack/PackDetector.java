@@ -32,6 +32,10 @@ import java.util.UUID;
  *
  * <p>客户端缓存的指纹包即"该设备玩过此账号"的凭证：同设备后续账号的 info 响应里
  * 不会包含已缓存的包，据此建立关联。
+ *
+ * <p>Spoof 判定：新账号自己的指纹包刚分配、不可能有缓存，首响应 HAVE_ALL（谎称全部
+ * 已缓存）或跳过流程直接 COMPLETED 即为伪造 → 标记 ResourcePackSpoof，且全部按命中
+ * 入账（谎报者只可能是小号或作弊端）。
  */
 public class PackDetector implements Listener {
 

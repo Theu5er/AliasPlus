@@ -24,11 +24,22 @@
     </repositories>
 
     <dependencies>
+        <!--
+          Nukkit-MOT。官方发布 jar 为 shade 产物（netty 4.2、netty-transport-nethernet、
+          gson、jose4j 等全部在内），排除全部传递依赖：只依赖这一个 jar 即可编译，
+          同时避免解析 opencollab 等镜像不可达的私有快照仓库。
+        -->
         <dependency>
             <groupId>cn.nukkit</groupId>
             <artifactId>Nukkit</artifactId>
             <version>MOT-SNAPSHOT</version>
             <scope>provided</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>*</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
     </dependencies>
 

@@ -91,13 +91,16 @@ public class AliasCommand extends Command {
         Set<String> deviceMatches = related.get("device");
         Set<String> selfMatches = related.get("selfSigned");
         Set<String> clientMatches = related.get("clientRandom");
+        Set<String> networkMatches = related.get("networkid");
         Set<String> packMatches = related.get("pack");
-        Set<String> blobRelated = related.get("blob");
+        // BlobCache 行展示"主账号"（目标命中了谁的指纹，即它挂在谁名下），
+        // 与查询 API（getRelatedByDimension 的单向 blob）方向不同，后者保持不变
+        Set<String> blobRelated = plugin.getBlobMains(targetUuid);
 
         sender.sendMessage("§l--" + targetName + "'s accounts (" + display + ")--");
 
         boolean hasAny = !deviceMatches.isEmpty() || !selfMatches.isEmpty()
-                || !clientMatches.isEmpty() || !packMatches.isEmpty()
+                || !clientMatches.isEmpty() || !networkMatches.isEmpty() || !packMatches.isEmpty()
                 || !blobRelated.isEmpty() || spoof;
 
         if (hasAny) {
@@ -107,6 +110,8 @@ public class AliasCommand extends Command {
                 sender.sendMessage("§l§cSelfSignedId: §r§7" + formatUuids(selfMatches));
             if (!clientMatches.isEmpty())
                 sender.sendMessage("§l§cClientRandomId: §r§7" + formatUuids(clientMatches));
+            if (!networkMatches.isEmpty())
+                sender.sendMessage("§l§cNetworkID: §r§7" + formatUuids(networkMatches));
             if (!packMatches.isEmpty())
                 sender.sendMessage("§l§cResPackCache: §r§7" + formatUuids(packMatches));
             if (!blobRelated.isEmpty())
