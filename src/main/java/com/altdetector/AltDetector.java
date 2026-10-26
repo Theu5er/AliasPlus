@@ -155,11 +155,12 @@ public class AltDetector extends PluginBase implements Listener {
     /* ================================================================== */
 
     /**
-     * 查询目标玩家各维度的关联账号（与 /alias 输出的各维度完全一致）。
+     * 查询目标玩家各维度的关联账号（单向结果；/alias 的 ResPackCache 与 BlobCache 两行
+     * 展示的是方向相反的"主账号"，见 {@link #getPackMains} / {@link #getBlobMains}）。
      *
      * @param targetUuid 目标玩家 uuid（字符串形式；uuid 大小写不敏感，按存储键精确匹配）
      * @return 维度 → 关联账号 uuid 集合；维度固定为 device / selfSigned / clientRandom /
-     *         pack / blob 五类，集合不含目标自身，目标无记录时各集合为空
+     *         networkid / pack / blob 六类，集合不含目标自身，目标无记录时各集合为空
      */
     public Map<String, Set<String>> getRelatedByDimension(String targetUuid) {
         Map<String, Set<String>> result = new LinkedHashMap<>();
@@ -216,6 +217,21 @@ public class AltDetector extends PluginBase implements Listener {
      */
     public Set<String> getBlobMains(String targetUuid) {
         return this.blobDetector == null ? new LinkedHashSet<>() : this.blobDetector.getBlobOwners(targetUuid);
+    }
+
+    /**
+     * /alias 展示辅助：目标玩家的 Pack 维度"主账号"——目标客户端缓存命中过的账号
+     * （目标缓存了谁的资源包指纹）。与 {@link #getRelatedByDimension} 的 pack 维度
+     * 方向相反，仅供 /alias 展示使用，不影响查询 API 的返回结果。
+     */
+    public Set<String> getPackMains(String targetUuid) {
+        Set<String> mains = new LinkedHashSet<>();
+        for (Map.Entry<String, List<String>> e : store.getPackClaims().entrySet()) {
+            if (e.getValue().contains(targetUuid) && !e.getKey().equals(targetUuid)) {
+                mains.add(e.getKey());
+            }
+        }
+        return mains;
     }
 
     /**

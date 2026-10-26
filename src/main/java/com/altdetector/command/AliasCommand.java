@@ -92,9 +92,9 @@ public class AliasCommand extends Command {
         Set<String> selfMatches = related.get("selfSigned");
         Set<String> clientMatches = related.get("clientRandom");
         Set<String> networkMatches = related.get("networkid");
-        Set<String> packMatches = related.get("pack");
-        // BlobCache 行展示"主账号"（目标命中了谁的指纹，即它挂在谁名下），
-        // 与查询 API（getRelatedByDimension 的单向 blob）方向不同，后者保持不变
+        // ResPackCache 与 BlobCache 两行展示"主账号"（目标命中了谁的指纹，即它挂在谁名下），
+        // 与查询 API（getRelatedByDimension 的单向 pack/blob）方向不同，后者保持不变
+        Set<String> packMatches = plugin.getPackMains(targetUuid);
         Set<String> blobRelated = plugin.getBlobMains(targetUuid);
 
         sender.sendMessage("§l--" + targetName + "'s accounts (" + display + ")--");
