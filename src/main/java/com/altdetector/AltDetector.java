@@ -219,6 +219,21 @@ public class AltDetector extends PluginBase implements Listener {
     }
 
     /**
+     * /alias 展示辅助：目标玩家的 Pack 维度"主账号"——目标客户端缓存命中的账号
+     * （目标缓存了谁的资源包指纹）。与 {@link #getRelatedByDimension} 的 pack 维度方向
+     * 相反，仅供 /alias 展示使用，不影响查询 API 的返回结果。
+     */
+    public Set<String> getPackMains(String targetUuid) {
+        Set<String> mains = new LinkedHashSet<>();
+        for (Map.Entry<String, List<String>> e : this.store.getPackClaims().entrySet()) {
+            if (e.getValue().contains(targetUuid) && !e.getKey().equals(targetUuid)) {
+                mains.add(e.getKey());
+            }
+        }
+        return mains;
+    }
+
+    /**
      * 开发者 API：惩罚目标玩家及其全部关联小号（关联结果与 /alias 完全一致）。
      *
      * <p>执行方式由 config.yml 决定：

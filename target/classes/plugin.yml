@@ -1,0 +1,11 @@
+name: Alias+
+main: com.altdetector.AltDetector
+version: "1.0.3"
+api: ["1.0.0"]
+author: u5er
+load: POSTWORLD
+description: Advanced Alt Detection Plugin
+permissions:
+  altdetector.alias:
+    description: Query a player's linked alt accounts via /alias
+    default: op

@@ -1,0 +1,12 @@
+/data/data/com.termux/files/home/AliasPlus/src/main/java/com/altdetector/AltDetector.java
+/data/data/com.termux/files/home/AliasPlus/src/main/java/com/altdetector/blob/BlobDetector.java
+/data/data/com.termux/files/home/AliasPlus/src/main/java/com/altdetector/command/AliasCommand.java
+/data/data/com.termux/files/home/AliasPlus/src/main/java/com/altdetector/net/NetherNetAccessor.java
+/data/data/com.termux/files/home/AliasPlus/src/main/java/com/altdetector/net/NetworkIdDetector.java
+/data/data/com.termux/files/home/AliasPlus/src/main/java/com/altdetector/pack/FingerprintPack.java
+/data/data/com.termux/files/home/AliasPlus/src/main/java/com/altdetector/pack/PackDetector.java
+/data/data/com.termux/files/home/AliasPlus/src/main/java/com/altdetector/protocol/ClientCacheBlobStatusPacket.java
+/data/data/com.termux/files/home/AliasPlus/src/main/java/com/altdetector/protocol/ClientCacheMissResponsePacket.java
+/data/data/com.termux/files/home/AliasPlus/src/main/java/com/altdetector/punish/PunishManager.java
+/data/data/com.termux/files/home/AliasPlus/src/main/java/com/altdetector/store/PlayerStore.java
+/data/data/com.termux/files/home/AliasPlus/src/main/java/com/altdetector/util/XxHash64.java
