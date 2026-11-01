@@ -54,13 +54,13 @@ public class FingerprintPack implements ResourcePack {
             zos.putNextEntry(entry);
             zos.write(manifest.getBytes(StandardCharsets.UTF_8));
             zos.closeEntry();
-        } catch (Exception e) { throw new RuntimeException("生成资源包失败", e); }
+        } catch (Exception e) { throw new RuntimeException("Failed to build resource pack", e); }
         return baos.toByteArray();
     }
 
     private static byte[] computeSha256(byte[] data) {
         try { return MessageDigest.getInstance("SHA-256").digest(data); }
-        catch (Exception e) { throw new RuntimeException("SHA-256 失败", e); }
+        catch (Exception e) { throw new RuntimeException("SHA-256 failed", e); }
     }
 
     @Override public String getPackName() { return "Test"; }

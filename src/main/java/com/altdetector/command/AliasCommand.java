@@ -32,8 +32,8 @@ public class AliasCommand extends Command {
     public boolean execute(CommandSender sender, String label, String[] args) {
         if (!this.testPermission(sender)) return true;
         if (args.length < 1) {
-            sender.sendMessage(TextFormat.YELLOW + "用法:");
-            sender.sendMessage(TextFormat.GRAY + "  /alias <玩家名/uuid>");
+            sender.sendMessage(TextFormat.YELLOW + "Usage:");
+            sender.sendMessage(TextFormat.GRAY + "  /alias <player/uuid>");
             return true;
         }
 

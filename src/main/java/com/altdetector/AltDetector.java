@@ -45,6 +45,9 @@ import java.util.Set;
  */
 public class AltDetector extends PluginBase implements Listener {
 
+    /* 首次连接被踢时显示给玩家的默认提示 */
+    public static final String DEFAULT_INIT_MESSAGE = "Re-entering server to complete initialization";
+
     private Config config;
     private PlayerStore store;
     private NetworkIdDetector networkIdDetector;
@@ -68,6 +71,7 @@ public class AltDetector extends PluginBase implements Listener {
         if (!config.exists("punish-command")) config.set("punish-command", "ban %player% Alt account detected");
         if (!config.exists("punish-delay-min")) config.set("punish-delay-min", 5);
         if (!config.exists("punish-delay-max")) config.set("punish-delay-max", 30);
+        if (!config.exists("init-message")) config.set("init-message", DEFAULT_INIT_MESSAGE);
         config.save();
 
         if (!playersConfig.exists("players")) playersConfig.set("players", new LinkedHashMap<>());
@@ -149,6 +153,12 @@ public class AltDetector extends PluginBase implements Listener {
     /** 延迟封禁最大间隔（秒）。 */
     public int getPunishDelayMax() {
         return this.config.getInt("punish-delay-max", 30);
+    }
+
+    /** 首次连接被踢时显示给玩家的提示文本。 */
+    public String getInitMessage() {
+        String msg = this.config.getString("init-message", DEFAULT_INIT_MESSAGE);
+        return msg == null || msg.trim().isEmpty() ? DEFAULT_INIT_MESSAGE : msg;
     }
 
     /* ================================================================== */

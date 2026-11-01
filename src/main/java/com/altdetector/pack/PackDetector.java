@@ -145,7 +145,7 @@ public class PackDetector implements Listener {
             f2.setAccessible(true);
             f2.set(pk, new ResourcePack[0]);
         } catch (Exception e) {
-            plugin.getLogger().warning("[设置] 失败: " + e.getMessage());
+            plugin.getLogger().warning("[Setup] failed: " + e.getMessage());
         }
     }
 
@@ -245,7 +245,7 @@ public class PackDetector implements Listener {
                 }
             }
         } catch (Exception e) {
-            plugin.getLogger().warning("[提取] 失败: " + e.getMessage());
+            plugin.getLogger().warning("[Extract] failed: " + e.getMessage());
         }
         return uuids;
     }
@@ -263,7 +263,7 @@ public class PackDetector implements Listener {
 
         pendingReconnect.put(playerUuidStr, System.currentTimeMillis());
         sentPacks.remove(player.getUniqueId());
-        player.kick("Rejoin the server to complete initialization.", false);
+        player.kick(plugin.getInitMessage(), false);
     }
 
     /* ================================================================== */
@@ -301,7 +301,7 @@ public class PackDetector implements Listener {
                 ((Map<UUID, ResourcePack>) f.get(manager)).put(pack.getPackId(), pack);
             } catch (NoSuchFieldException ignored) {}
         } catch (Exception e) {
-            plugin.getLogger().warning("[注册] 异常: " + e.getMessage());
+            plugin.getLogger().warning("[Register] error: " + e.getMessage());
         }
     }
 }

@@ -116,7 +116,7 @@ public class BlobDetector implements Listener {
             network.registerPacket((byte) ProtocolInfo.CLIENT_CACHE_BLOB_STATUS_PACKET, ClientCacheBlobStatusPacket.class);
             network.registerPacket((byte) ProtocolInfo.CLIENT_CACHE_MISS_RESPONSE_PACKET, ClientCacheMissResponsePacket.class);
         } catch (Exception e) {
-            plugin.getLogger().warning("注册 blob cache 协议包失败: " + e);
+            plugin.getLogger().warning("Failed to register blob cache packet: " + e);
         }
     }
 
@@ -325,7 +325,7 @@ public class BlobDetector implements Listener {
                 try {
                     this.sendProbeChunks(player, ids);
                 } catch (Exception e) {
-                    plugin.getLogger().warning("发送 blob 探测区块失败: " + e);
+                    plugin.getLogger().warning("Failed to send blob probe chunk: " + e);
                     this.finishScan(uuid);
                 }
             } else {
@@ -389,7 +389,7 @@ public class BlobDetector implements Listener {
                 chunks.add(chunkKey(cx, cz));
                 this.statProbesSent++;
             } catch (Exception e) {
-                plugin.getLogger().warning("发送 blob 探测区块失败: " + e);
+                plugin.getLogger().warning("Failed to send blob probe chunk: " + e);
             }
         }
 
@@ -463,7 +463,7 @@ public class BlobDetector implements Listener {
             }
             player.dataPacket(resp);
         } catch (Exception e) {
-            plugin.getLogger().warning("回应探测 subchunk 请求失败: " + e);
+            plugin.getLogger().warning("Failed to respond to subchunk probe request: " + e);
         }
     }
 

@@ -132,7 +132,7 @@ public class ClientCacheBlobStatusPacket extends DataPacket {
         int readCount(String field) {
             long v = this.readUvarint();
             if (v < 0 || v > MAX_LIST_SIZE) {
-                throw new IllegalStateException("0x87 " + field + " 超出合理范围: " + v);
+                throw new IllegalStateException("0x87 " + field + " out of range: " + v);
             }
             return (int) v;
         }
@@ -142,7 +142,7 @@ public class ClientCacheBlobStatusPacket extends DataPacket {
             int shift = 0;
             while (true) {
                 if (this.pos >= this.data.length) {
-                    throw new IllegalStateException("0x87 uvarint 越界（报文被截断）");
+                    throw new IllegalStateException("0x87 uvarint out of bounds (packet truncated)");
                 }
                 int b = this.data[this.pos++] & 0xFF;
                 value |= (long) (b & 0x7F) << shift;
@@ -151,14 +151,14 @@ public class ClientCacheBlobStatusPacket extends DataPacket {
                 }
                 shift += 7;
                 if (shift > 63) {
-                    throw new IllegalStateException("0x87 uvarint 过长");
+                    throw new IllegalStateException("0x87 uvarint too long");
                 }
             }
         }
 
         long[] readLongs(int count) {
             if (count * 8 > this.remaining()) {
-                throw new IllegalStateException("0x87 读取 " + count + " 个 long 越界");
+                throw new IllegalStateException("0x87 read " + count + " longs out of bounds");
             }
             long[] out = new long[count];
             for (int i = 0; i < count; i++) {

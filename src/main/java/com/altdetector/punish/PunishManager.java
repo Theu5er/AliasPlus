@@ -127,7 +127,7 @@ public class PunishManager {
         try {
             plugin.getServer().dispatchCommand(plugin.getServer().getConsoleSender(), cmd);
         } catch (Exception e) {
-            plugin.getLogger().warning("执行惩罚命令失败 (" + p.uuid + "): " + e);
+            plugin.getLogger().warning("Punish command failed (" + p.uuid + "): " + e);
         }
         // 打上已惩罚标记：之后该账号的指纹被新账号命中时，可自动惩罚新账号
         store.markPunished(p.uuid);
