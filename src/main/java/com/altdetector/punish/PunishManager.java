@@ -123,7 +123,7 @@ public class PunishManager {
     private void execute(PendingPunish p) {
         String cmd = plugin.getPunishCommand()
                 .replace("%player%", p.name)
-                .replace("%uuid%", p.uuid);
+                .replace("%uuid%", store.uuidOf(p.uuid));
         try {
             plugin.getServer().dispatchCommand(plugin.getServer().getConsoleSender(), cmd);
         } catch (Exception e) {

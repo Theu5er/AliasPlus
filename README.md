@@ -14,10 +14,6 @@ We have more detection methods than similar plugins, so the average spoofer is n
 **High Accuracy**
 Detection does not rely on non-unique evidence like IP; results can be used for bans directly.
 
-🤫
-**Silent Detection**
-Detection is almost completely silent and supports delayed punishments—cheaters have no idea why they got banned.
-
 🔗
 **Developer API**
 We provide query and punishment APIs, allowing you to ban all alt accounts with one call.

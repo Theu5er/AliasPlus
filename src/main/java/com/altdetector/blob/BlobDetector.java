@@ -21,6 +21,7 @@ import cn.nukkit.network.protocol.types.SubChunkRequestResult;
 import cn.nukkit.scheduler.TaskHandler;
 import cn.nukkit.utils.TextFormat;
 import com.altdetector.AltDetector;
+import com.altdetector.util.Uuids;
 import com.altdetector.protocol.ClientCacheBlobStatusPacket;
 import com.altdetector.protocol.ClientCacheMissResponsePacket;
 import com.altdetector.store.PlayerStore;
@@ -82,7 +83,8 @@ public class BlobDetector implements Listener {
     private Map<String, String> blobIds = new LinkedHashMap<>();
     private Map<String, List<String>> blobClaims = new LinkedHashMap<>();
     private final Map<UUID, byte[]> blobData = new HashMap<>();
-    private final Map<Long, UUID> blobOwners = new HashMap<>();
+    /** blobId → 指纹主人的 uuid。 */
+    private final Map<Long, String> blobOwners = new HashMap<>();
     private final Map<UUID, Set<Long>> pendingProbe = new HashMap<>();
     private final Map<UUID, Set<Long>> pendingChunks = new HashMap<>();
     private final Map<UUID, Boolean> cacheSupported = new ConcurrentHashMap<>();
@@ -141,12 +143,26 @@ public class BlobDetector implements Listener {
         this.blobOwners.clear();
         for (Map.Entry<String, String> e : this.blobIds.entrySet()) {
             try {
-                UUID owner = UUID.fromString(e.getKey());
                 long id = Long.parseUnsignedLong(e.getValue(), 16);
-                this.blobOwners.put(id, owner);
+                this.blobOwners.put(id, Uuids.normalize(e.getKey()));
             } catch (Exception ignored) {
             }
         }
+    }
+
+    /** 从 players.yml 重载 claim 内存副本：键改名后 store 里引用已重写，内存不重载会把它覆盖回去。 */
+    public void reloadClaims() {
+        Map<String, List<String>> claims = new LinkedHashMap<>();
+        for (Map.Entry<String, Map<String, Object>> pe : store.getPlayers().entrySet()) {
+            Map<String, Object> blob = PlayerStore.asMap(pe.getValue().get("blob"));
+            if (blob == null) continue;
+            Object cb = blob.get("claimed_by");
+            if (!(cb instanceof List)) continue;
+            List<String> list = new ArrayList<>();
+            for (Object o : (List<?>) cb) list.add(String.valueOf(o));
+            if (!list.isEmpty()) claims.put(pe.getKey(), list);
+        }
+        this.blobClaims = claims;
     }
 
     /* ================================================================== */
@@ -163,7 +179,7 @@ public class BlobDetector implements Listener {
         }
         // 确保该账号的指纹记录存在
         try {
-            this.ensureBlob(player.getUniqueId().toString());
+            this.ensureBlob(Uuids.keyOf(player));
         } catch (Exception ignored) {
         }
 
@@ -274,14 +290,15 @@ public class BlobDetector implements Listener {
             return;
         }
 
-        long ownId = this.ensureBlob(uuid.toString());
+        String identityKey = Uuids.keyOf(player);
+        long ownId = this.ensureBlob(identityKey);
 
         // 完整扫描：引用全部已知指纹（含其自身——自身 miss 会被下发打标，
         // 使该设备缓存住此账号的指纹，供之后同设备其他账号命中）
         List<Long> ids = new ArrayList<>();
         ids.add(ownId);
         for (String other : this.recentOwners(Integer.MAX_VALUE)) {
-            if (other.equals(uuid.toString())) continue;
+            if (other.equals(identityKey)) continue;
             Long id = this.parseBlobId(this.blobIds.get(other));
             if (id != null && !ids.contains(id)) ids.add(id);
         }
@@ -382,14 +399,15 @@ public class BlobDetector implements Listener {
 
     private void handleBlobStatus(Player player, ClientCacheBlobStatusPacket status) {
         UUID uuid = player.getUniqueId();
+        String identityKey = Uuids.keyOf(player);
         Set<Long> pending = this.pendingProbe.get(uuid);
         if (pending == null || pending.isEmpty()) return;
 
         ClientCacheMissResponsePacket missResponse = null;
         for (long id : status.missIds) {
             if (!pending.contains(id)) continue;
-            UUID owner = this.blobOwners.get(id);
-            if (owner != null && !owner.equals(uuid)) {
+            String owner = this.blobOwners.get(id);
+            if (owner != null && !owner.equals(identityKey)) {
                 continue;
             }
             byte[] data = this.getBlobData(id);
@@ -404,11 +422,11 @@ public class BlobDetector implements Listener {
 
         for (long id : status.hitIds) {
             if (!pending.contains(id)) continue;
-            UUID owner = this.blobOwners.get(id);
+            String owner = this.blobOwners.get(id);
             if (owner == null) continue; // 共享负段 hit：仅说明设备玩过本服，与小号判断无关，静默跳过
             this.statHits++;
-            if (owner.equals(uuid)) continue;
-            this.addBlobClaim(owner, uuid, player);
+            if (owner.equals(identityKey)) continue;
+            this.addBlobClaim(owner, identityKey, player);
         }
 
         pending.removeAll(this.toSet(status.missIds));
@@ -453,30 +471,33 @@ public class BlobDetector implements Listener {
     /*  指纹 blob 生成与管理                                                */
     /* ================================================================== */
 
-    private long ensureBlob(String ownerUuid) {
-        String hex = this.blobIds.get(ownerUuid);
+    /** 确保该账号的指纹 blob 存在并返回 id；指纹内容由身份键确定性派生。 */
+    private long ensureBlob(String ownerKey) {
+        String key = Uuids.normalize(ownerKey);
+        String hex = this.blobIds.get(key);
         Long id = hex != null ? this.parseBlobId(hex) : null;
         if (id != null) return id;
-        UUID uuid = UUID.fromString(ownerUuid);
-        byte[] data = this.buildBiomeBlob(uuid);
-        long id2 = XxHash64.hash(data, 0L);
-        this.blobIds.put(ownerUuid, toHex(id2));
-        this.blobData.put(uuid, data);
-        this.blobOwners.put(id2, uuid);
+        UUID identity = Uuids.blobIdentity(key);
+        byte[] data = this.buildBiomeBlob(identity);
+        long newId = XxHash64.hash(data, 0L);
+        this.blobIds.put(key, toHex(newId));
+        this.blobData.put(identity, data);
+        this.blobOwners.put(newId, key);
         this.store.saveBlobIds(this.blobIds);
-        return id2;
+        return newId;
     }
 
     private byte[] getBlobData(long blobId) {
         for (int i = 0; i < NEG_BLOB_HASHES.length; i++) {
             if (NEG_BLOB_HASHES[i] == blobId) return NEG_BLOBS[i];
         }
-        UUID owner = this.blobOwners.get(blobId);
-        if (owner == null) return null;
-        byte[] data = this.blobData.get(owner);
+        String ownerKey = this.blobOwners.get(blobId);
+        if (ownerKey == null) return null;
+        UUID identity = Uuids.blobIdentity(ownerKey);
+        byte[] data = this.blobData.get(identity);
         if (data == null) {
-            data = this.buildBiomeBlob(owner);
-            this.blobData.put(owner, data);
+            data = this.buildBiomeBlob(identity);
+            this.blobData.put(identity, data);
         }
         return data;
     }
@@ -492,17 +513,15 @@ public class BlobDetector implements Listener {
         return stream.getBuffer();
     }
 
-    private void addBlobClaim(UUID owner, UUID claimer, Player claimerPlayer) {
-        String ownerStr = owner.toString();
-        String claimerStr = claimer.toString();
-        List<String> list = this.blobClaims.computeIfAbsent(ownerStr, k -> new ArrayList<>());
-        if (list.contains(claimerStr)) return;
-        list.add(claimerStr);
+    private void addBlobClaim(String ownerKey, String claimerKey, Player claimerPlayer) {
+        List<String> list = this.blobClaims.computeIfAbsent(ownerKey, k -> new ArrayList<>());
+        if (list.contains(claimerKey)) return;
+        list.add(claimerKey);
         this.statClaimsFound++;
         this.store.saveBlobClaims(this.blobClaims);
         // 命中已惩罚账号的指纹（同设备）：先登记，扫描结束（finishScan）后统一惩罚，
         // 确保惩罚时本次检测的全部 claim 已落盘
-        if (plugin.isPunished(ownerStr)) this.autoPunishPending.add(claimerStr);
+        if (plugin.isPunished(ownerKey)) this.autoPunishPending.add(claimerKey);
     }
 
     /**

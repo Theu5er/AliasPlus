@@ -1,6 +1,7 @@
 package com.altdetector.store;
 
 import cn.nukkit.utils.Config;
+import com.altdetector.util.Uuids;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -12,17 +13,16 @@ import java.util.UUID;
 /**
  * players.yml 数据层：玩家档案、检测标识符、资源包/Blob 指纹关联的全部读写。
  *
- * <p>记录结构（players 键下，uuid 为键）：
+ * <p>players 下的键是<b>身份键</b>：xbox-auth=off 用 UUID，开启用 XUID。
  * <pre>
- * name / aliases / xuid        —— 身份（storePlayerProfile 写入）
+ * name / aliases / uuid —— 身份（uuid 即存储键）
  * ids: {device, selfSigned, clientRandom, networkid} —— 登录标识符与 NetherNet NetworkID
  * pack: {uuid, claimed_by}     —— 资源包指纹与命中者
  * blob: {id, claimed_by}       —— Blob 指纹与命中者
  * ResourcePackSpoof            —— 客户端谎报缓存标记
  * </pre>
  *
- * <p>所有写操作先 {@code reload()} 再 {@code save()}，保证与磁盘同步；
- * 只读操作每次从 Config 解析副本，调用方修改副本不会直接影响磁盘。
+ * <p>写操作先 {@code reload()} 再 {@code save()}；只读操作返回副本，调用方改动不影响磁盘。
  */
 public class PlayerStore {
 
@@ -58,6 +58,19 @@ public class PlayerStore {
         return r;
     }
 
+    /** 单条记录副本；语义等同 getPlayers().get(key)，但不复制整张表。 */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> getPlayer(String key) {
+        Object raw = playersConfig.get("players");
+        if (!(raw instanceof Map)) return null;
+        Object v = ((Map<Object, Object>) raw).get(key);
+        if (!(v instanceof Map)) return null;
+        Map<String, Object> inner = new LinkedHashMap<>();
+        for (Map.Entry<Object, Object> ie : ((Map<Object, Object>) v).entrySet())
+            inner.put(String.valueOf(ie.getKey()), ie.getValue());
+        return inner;
+    }
+
     @SuppressWarnings("unchecked")
     public static Map<String, Object> asMap(Object o) {
         if (o instanceof Map) {
@@ -81,11 +94,20 @@ public class PlayerStore {
         Map<String, Object> info = new LinkedHashMap<>();
         info.put("name", "");
         info.put("aliases", new ArrayList<>());
+        info.put("uuid", "");
         info.put("ResourcePackSpoof", false);
         info.put("Punished", false);
         info.put("ids", new LinkedHashMap<>());
         info.put("pack", new LinkedHashMap<>());
         info.put("blob", new LinkedHashMap<>());
+        return info;
+    }
+
+    /** 以 UUID 新建记录。 */
+    public static Map<String, Object> newPlayerRecordFor(String playerUuid) {
+        Map<String, Object> info = newPlayerRecord();
+        String key = Uuids.normalize(playerUuid);
+        info.put("uuid", Uuids.isUuid(key) ? key : "");
         return info;
     }
 
@@ -185,14 +207,21 @@ public class PlayerStore {
     public void normalizePlayers() {
         Map<String, Map<String, Object>> players = getPlayers();
         boolean changed = false;
-        for (Map<String, Object> info : players.values()) {
+        for (Map.Entry<String, Map<String, Object>> entry : players.entrySet()) {
+            Map<String, Object> info = entry.getValue();
             if (!info.containsKey("name")) { info.put("name", ""); changed = true; }
             if (!info.containsKey("aliases")) { info.put("aliases", new ArrayList<>()); changed = true; }
+            if (!info.containsKey("uuid")) { info.put("uuid", ""); changed = true; }
             if (!info.containsKey("ResourcePackSpoof")) { info.put("ResourcePackSpoof", false); changed = true; }
             if (!info.containsKey("Punished")) { info.put("Punished", false); changed = true; }
             if (!info.containsKey("ids")) { info.put("ids", new LinkedHashMap<>()); changed = true; }
             if (!info.containsKey("pack")) { info.put("pack", new LinkedHashMap<>()); changed = true; }
             if (!info.containsKey("blob")) { info.put("blob", new LinkedHashMap<>()); changed = true; }
+            // 键本身是 UUID 时回填 uuid 字段
+            String key = Uuids.normalize(entry.getKey());
+            if (isEmptyValue(info.get("uuid")) && Uuids.isUuid(key)) {
+                info.put("uuid", key); changed = true;
+            }
         }
         if (changed) {
             playersConfig.reload();
@@ -254,28 +283,58 @@ public class PlayerStore {
     /*  身份档案与标识符写入                                                */
     /* ================================================================== */
 
-    public void storePlayerProfile(String playerUuid, String playerName, String xuid) {
+    /** 写入/更新玩家档案；返回被并入当前 uuid 的老键（老版本遗留），非 null 时调用方需重载 claim 内存副本。 */
+    public String storePlayerProfile(String playerUuid, String playerName) {
         Map<String, Map<String, Object>> players = getPlayers();
-        Map<String, Object> info = players.get(playerUuid);
-        boolean changed = false;
+        ProfileWrite w = applyProfile(players, Uuids.normalize(playerUuid), playerName);
+        if (w.changed) {
+            playersConfig.set("players", players);
+            playersConfig.save();
+        }
+        return w.adopted;
+    }
 
+    /** 一次落盘写完整条登录：档案 + 登录时抓到的全部标识符。 */
+    public String storeLogin(String playerUuid, String playerName, Map<String, String> identifiers) {
+        playersConfig.reload();
+        Map<String, Map<String, Object>> players = getPlayers();
+        String key = Uuids.normalize(playerUuid);
+        ProfileWrite w = applyProfile(players, key, playerName);
+        if (!w.skipped) {
+            Map<String, Object> info = players.get(key);
+            for (Map.Entry<String, String> e : identifiers.entrySet()) {
+                String id = e.getValue();
+                if (id == null || id.isEmpty()) continue;
+                Map<String, Object> ids = resolveNested(info, "ids");
+                if (!id.equals(ids.get(e.getKey()))) { ids.put(e.getKey(), id); w.changed = true; }
+            }
+        }
+        if (w.changed) {
+            playersConfig.set("players", players);
+            playersConfig.save();
+        }
+        return w.adopted;
+    }
+
+    /** 档案写入的公共部分：只改内存副本，不落盘。 */
+    private ProfileWrite applyProfile(Map<String, Map<String, Object>> players, String key, String playerName) {
+        ProfileWrite w = new ProfileWrite();
+        if (key.isEmpty() || playerName == null) { w.skipped = true; return w; }
+        // 老版本可能把档案存在别的键下（例如 xuid），按 uuid 字段并回来
+        String adopted = adoptLegacyRecords(players, key);
+        boolean changed = adopted != null;
+
+        Map<String, Object> info = players.get(key);
         if (info == null) {
-            info = new LinkedHashMap<>();
+            info = newPlayerRecordFor(key);
             info.put("name", playerName);
-            if (xuid != null && !xuid.isEmpty()) info.put("xuid", xuid);
             List<String> aliases = new ArrayList<>();
             aliases.add(playerName);
             info.put("aliases", aliases);
-            info.put("ResourcePackSpoof", false);
-            info.put("Punished", false);
-            info.put("ids", new LinkedHashMap<>());
-            info.put("pack", new LinkedHashMap<>());
-            info.put("blob", new LinkedHashMap<>());
-            players.put(playerUuid, info);
+            players.put(key, info);
             changed = true;
         } else {
             if (!playerName.equals(info.get("name"))) { info.put("name", playerName); changed = true; }
-            if (xuid != null && !xuid.isEmpty() && !xuid.equals(info.get("xuid"))) { info.put("xuid", xuid); changed = true; }
             Object aliasesObj = info.get("aliases");
             List<String> aliases = new ArrayList<>();
             if (aliasesObj instanceof List) for (Object o : (List<?>) aliasesObj) aliases.add(String.valueOf(o));
@@ -284,25 +343,33 @@ public class PlayerStore {
             if (!info.containsKey("Punished")) { info.put("Punished", false); changed = true; }
         }
 
-        // 收养同名空壳记录：首次检测（可能发生在未认证连接上）留下的壳——pack 已分配给该
-        // 设备且客户端可能已缓存——搬到当前身份名下并删除壳，保证下次重连按 UUID 就能命中，
-        // 同时 players.yml 里不再残留 name 缺失的空玩家
-        if (adoptShellRecords(playerUuid, playerName, info, players)) changed = true;
+        if (!key.equals(info.get("uuid"))) { info.put("uuid", key); changed = true; }
 
-        if (changed) {
-            playersConfig.reload();
-            playersConfig.set("players", players);
-            playersConfig.save();
-        }
+        // 收养同名空壳记录：首次检测（可能发生在未认证连接上）留下的壳——pack 已分配给该
+        // 设备且客户端可能已缓存——搬到当前身份名下并删除壳，保证下次重连按身份键就能命中，
+        // 同时 players.yml 里不再残留 name 缺失的空玩家
+        if (adoptShellRecords(key, playerName, info, players)) changed = true;
+
+        w.adopted = adopted;
+        w.changed = changed;
+        return w;
     }
 
+    /** applyProfile 的返回值。 */
+    private static final class ProfileWrite {
+        String adopted;
+        boolean changed;
+        boolean skipped;
+    }
+
+    /** 写入某个维度的标识符（playerUuid 参数实为身份键）。 */
     public void storeIdentifier(String type, String identifier, String playerUuid) {
         if (identifier == null || identifier.isEmpty()) return;
         playersConfig.reload();
         Map<String, Map<String, Object>> players = getPlayers();
         Map<String, Object> info = players.get(playerUuid);
         if (info == null) {
-            info = newPlayerRecord();
+            info = newPlayerRecordFor(playerUuid);
             info.put("name", playerUuid);
             players.put(playerUuid, info);
         }
@@ -338,7 +405,7 @@ public class PlayerStore {
     /* ================================================================== */
 
     public boolean isSpoofFlagged(String playerUuid) {
-        Map<String, Object> info = getPlayers().get(playerUuid);
+        Map<String, Object> info = getPlayer(playerUuid);
         if (info == null) return false;
         Object flag = info.get("ResourcePackSpoof");
         if (flag instanceof Boolean) return (Boolean) flag;
@@ -349,7 +416,7 @@ public class PlayerStore {
         Map<String, Map<String, Object>> players = getPlayers();
         Map<String, Object> info = players.get(playerUuid);
         if (info == null) {
-            info = newPlayerRecord();
+            info = newPlayerRecordFor(playerUuid);
             info.put("name", playerUuid);
             players.put(playerUuid, info);
         }
@@ -369,7 +436,7 @@ public class PlayerStore {
     /* ================================================================== */
 
     public boolean isPunishedFlagged(String playerUuid) {
-        Map<String, Object> info = getPlayers().get(playerUuid);
+        Map<String, Object> info = getPlayer(playerUuid);
         if (info == null) return false;
         Object flag = info.get("Punished");
         if (flag instanceof Boolean) return (Boolean) flag;
@@ -380,7 +447,7 @@ public class PlayerStore {
         Map<String, Map<String, Object>> players = getPlayers();
         Map<String, Object> info = players.get(playerUuid);
         if (info == null) {
-            info = newPlayerRecord();
+            info = newPlayerRecordFor(playerUuid);
             info.put("name", playerUuid);
             players.put(playerUuid, info);
         }
@@ -393,6 +460,117 @@ public class PlayerStore {
         playersConfig.reload();
         playersConfig.set("players", players);
         playersConfig.save();
+    }
+
+    /* ================================================================== */
+    /*  老数据归并（老版本把档案存在 uuid 以外的键下）                        */
+    /* ================================================================== */
+
+    /** 登录时把 uuid 字段相同、却挂在别的键下的老档案并进当前键（含 claim 引用重写）；返回被并入的老键，无则 null。 */
+    private String adoptLegacyRecords(Map<String, Map<String, Object>> players, String key) {
+        List<String> stale = new ArrayList<>();
+        for (Map.Entry<String, Map<String, Object>> e : players.entrySet()) {
+            if (e.getKey().trim().equalsIgnoreCase(key)) continue;
+            Object u = e.getValue().get("uuid");
+            if (!(u instanceof String)) continue;
+            String s = ((String) u).trim();
+            if (s.isEmpty() || !s.equalsIgnoreCase(key)) continue;
+            stale.add(e.getKey());
+        }
+        String adopted = null;
+        for (String old : stale) {
+            Map<String, Object> oldInfo = players.remove(old);
+            if (oldInfo == null) continue;
+            Map<String, Object> current = players.get(key);
+            if (current == null) players.put(key, oldInfo);
+            else mergeRecord(current, oldInfo);
+            remapClaimReferences(players, old, key);
+            adopted = old;
+        }
+        return adopted;
+    }
+
+    /** 老记录并入新记录：只填缺失项，不覆盖已有值。 */
+    @SuppressWarnings("unchecked")
+    private void mergeRecord(Map<String, Object> target, Map<String, Object> source) {
+        if (target == null || source == null) return;
+        if (isEmptyValue(target.get("name")) && !isEmptyValue(source.get("name")))
+            target.put("name", source.get("name"));
+        Object sa = source.get("aliases");
+        if (sa instanceof List && !((List<?>) sa).isEmpty()) {
+            List<String> merged = new ArrayList<>();
+            Object ta = target.get("aliases");
+            if (ta instanceof List) for (Object o : (List<?>) ta) merged.add(String.valueOf(o));
+            for (Object o : (List<?>) sa) {
+                String name = String.valueOf(o);
+                if (!merged.contains(name)) merged.add(name);
+            }
+            target.put("aliases", merged);
+        }
+        if (isEmptyValue(target.get("uuid")) && !isEmptyValue(source.get("uuid")))
+            target.put("uuid", source.get("uuid"));
+        for (String nested : new String[]{"ids", "pack", "blob"}) {
+            Map<String, Object> src = asMap(source.get(nested));
+            if (src == null || src.isEmpty()) continue;
+            Map<String, Object> dst = resolveNested(target, nested);
+            for (Map.Entry<String, Object> e : src.entrySet()) {
+                if (isEmptyValue(dst.get(e.getKey()))) dst.put(e.getKey(), e.getValue());
+            }
+        }
+        // 宁严勿松：丢标记等于放过已确认的小号
+        for (String flag : new String[]{"ResourcePackSpoof", "Punished"}) {
+            if (asBoolean(source.get(flag))) target.put(flag, true);
+        }
+    }
+
+    /** claim 引用重写：键改名后其他账号的命中列表仍写着老键，必须同步搬走。 */
+    @SuppressWarnings("unchecked")
+    private void remapClaimReferences(Map<String, Map<String, Object>> players, String oldKey, String newKey) {
+        for (Map<String, Object> info : players.values()) {
+            for (String nested : new String[]{"pack", "blob"}) {
+                Map<String, Object> m = asMap(info.get(nested));
+                if (m == null) continue;
+                Object cb = m.get("claimed_by");
+                if (!(cb instanceof List)) continue;
+                List<String> out = new ArrayList<>();
+                boolean changed = false;
+                for (Object o : (List<?>) cb) {
+                    String v = String.valueOf(o);
+                    String nv = v.equals(oldKey) ? newKey : v;
+                    if (!nv.equals(v)) changed = true;
+                    if (!out.contains(nv)) out.add(nv);
+                }
+                if (changed) resolveNested(info, nested).put("claimed_by", out);
+            }
+        }
+    }
+
+    /** 记录键（现在就是 UUID）；老版本按 xuid 存的历史记录取记录里的 uuid 字段。 */
+    public String uuidOf(String key) {
+        String k = Uuids.normalize(key);
+        Map<String, Object> info = getPlayer(k);
+        if (info != null) {
+            Object u = info.get("uuid");
+            String s = u == null ? "" : Uuids.normalize(String.valueOf(u));
+            if (Uuids.isUuid(s)) return s;
+        }
+        return k;
+    }
+
+    private static boolean asBoolean(Object v) {
+        if (v instanceof Boolean) return (Boolean) v;
+        return v != null && "true".equalsIgnoreCase(String.valueOf(v));
+    }
+
+    private static boolean isEmptyValue(Object v) {
+        if (v == null) return true;
+        if (v instanceof String) {
+            String s = ((String) v).trim();
+            return s.isEmpty() || "null".equalsIgnoreCase(s);
+        }
+        if (v instanceof List) return ((List<?>) v).isEmpty();
+        if (v instanceof Map) return ((Map<?, ?>) v).isEmpty();
+        return false;
     }
 
     /* ================================================================== */
@@ -411,6 +589,25 @@ public class PlayerStore {
         Object al = info.get("aliases");
         if (al instanceof List && !((List<?>) al).isEmpty()) return false;
         return true;
+    }
+
+    /** 按名字找空壳记录里已分配的指纹包（PackDetector 身份切换兜底用）。 */
+    public String findAdoptableShellPack(String playerName, String excludeUuid) {
+        if (playerName == null || playerName.isEmpty()) return null;
+        for (Map.Entry<String, Map<String, Object>> pe : getPlayers().entrySet()) {
+            if (pe.getKey().equalsIgnoreCase(excludeUuid)) continue;
+            Map<String, Object> info = pe.getValue();
+            if (!isShellRecord(info)) continue;
+            Object nm = info.get("name");
+            if (nm == null || String.valueOf(nm).trim().isEmpty()
+                    || !String.valueOf(nm).equalsIgnoreCase(playerName)) continue;
+            Map<String, Object> pack = asMap(info.get("pack"));
+            if (pack == null) continue;
+            Object pu = pack.get("uuid");
+            if (pu != null && !String.valueOf(pu).isEmpty() && !"null".equalsIgnoreCase(String.valueOf(pu)))
+                return String.valueOf(pu);
+        }
+        return null;
     }
 
     /**
@@ -477,7 +674,7 @@ public class PlayerStore {
         Map<String, Map<String, Object>> players = getPlayers();
         Map<String, Object> info = players.get(playerUuidStr);
         if (info == null) {
-            info = newPlayerRecord();
+            info = newPlayerRecordFor(playerUuidStr);
             info.put("name", (playerName != null && !playerName.isEmpty()) ? playerName : playerUuidStr);
             players.put(playerUuidStr, info);
         }
@@ -530,28 +727,29 @@ public class PlayerStore {
 
     /** 存量记录兼容读取：仅用于 /alias 排序，新记录不再写入该字段。 */
     public long lastMs(String uuid) {
-        Map<String, Object> p = getPlayers().get(uuid);
+        Map<String, Object> p = getPlayer(uuid);
         if (p == null) return 0L;
         Object v = p.get("lastMs");
         return v instanceof Number ? ((Number) v).longValue() : 0L;
     }
 
     public String displayName(String uuid) {
-        Map<String, Object> profile = getPlayers().get(uuid);
+        Map<String, Object> profile = getPlayer(uuid);
         return profile != null && profile.get("name") != null ? String.valueOf(profile.get("name")) : uuid;
     }
 
-    public String getDisplayIdentifier(String uuid) {
-        Map<String, Object> info = getPlayers().get(uuid);
+    /** 展示用的身份串：有 uuid 字段就用它，否则用键本身。 */
+    public String getDisplayIdentifier(String key) {
+        Map<String, Object> info = getPlayer(key);
         if (info != null) {
-            Object xuid = info.get("xuid");
-            if (xuid != null && !String.valueOf(xuid).isEmpty() && !String.valueOf(xuid).equals("null"))
-                return "xuid: " + xuid;
+            Object uuid = info.get("uuid");
+            String u = uuid == null ? "" : Uuids.normalize(String.valueOf(uuid));
+            if (Uuids.isUuid(u)) return "uuid: " + u;
         }
-        return "uuid: " + uuid;
+        return "uuid: " + Uuids.normalize(key);
     }
 
-    /** 统计全服当前名同名（忽略大小写）的账号数，用于决定 /alias 输出是否需要附带 xuid/uuid 消歧。 */
+    /** 统计全服当前名同名（忽略大小写）的账号数，用于决定 /alias 输出是否需要附带 uuid 消歧。 */
     public Map<String, Integer> buildNameCollisionMap() {
         Map<String, Integer> count = new HashMap<>();
         for (Map<String, Object> info : getPlayers().values()) {

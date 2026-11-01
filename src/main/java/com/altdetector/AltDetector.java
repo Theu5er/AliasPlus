@@ -9,6 +9,7 @@ import cn.nukkit.utils.Config;
 import cn.nukkit.utils.LoginChainData;
 import com.altdetector.blob.BlobDetector;
 import com.altdetector.command.AliasCommand;
+import com.altdetector.util.Uuids;
 import com.altdetector.net.NetworkIdDetector;
 import com.altdetector.pack.PackDetector;
 import com.altdetector.punish.PunishManager;
@@ -273,21 +274,24 @@ public class AltDetector extends PluginBase implements Listener {
         Player player = event.getPlayer();
         String playerName = player.getName();
         String playerUuid = player.getUniqueId().toString();
+        String key = Uuids.normalize(playerUuid);
 
         LoginChainData lcd = player.getLoginChainData();
-        String xuid = null;
-        if (lcd != null) { try { xuid = lcd.getXUID(); } catch (Exception ignored) {} }
 
-        store.storePlayerProfile(playerUuid, playerName, xuid);
-
+        // 档案 + 登录标识符一次落盘：原来要写 4 次盘，语义不变
+        Map<String, String> identifiers = new LinkedHashMap<>();
         if (lcd != null) {
-            store.storeIdentifier("device", lcd.getDeviceId(), playerUuid);
-            store.storeIdentifier("clientRandom", String.valueOf(lcd.getClientId()), playerUuid);
+            identifiers.put("device", lcd.getDeviceId());
+            identifiers.put("clientRandom", String.valueOf(lcd.getClientId()));
             try {
                 JsonObject rawData = lcd.getRawData();
                 if (rawData != null && rawData.has("SelfSignedId") && !rawData.get("SelfSignedId").isJsonNull())
-                    store.storeIdentifier("selfSigned", rawData.get("SelfSignedId").getAsString(), playerUuid);
+                    identifiers.put("selfSigned", rawData.get("SelfSignedId").getAsString());
             } catch (Exception ignored) {}
         }
+
+        // 老键档案已并入 → 引用被重写，claim 内存副本要重载
+        String adopted = store.storeLogin(key, playerName, identifiers);
+        if (adopted != null && this.blobDetector != null) this.blobDetector.reloadClaims();
     }
 }

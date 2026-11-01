@@ -1,5 +1,7 @@
 package com.altdetector.net;
 
+import com.altdetector.util.Uuids;
+
 import cn.nukkit.Player;
 import cn.nukkit.event.EventHandler;
 import cn.nukkit.event.EventPriority;
@@ -43,6 +45,6 @@ public class NetworkIdDetector implements Listener {
             // RakNet 连接或核心无 NetherNet 类：无值可存，不影响其他维度
             return;
         }
-        this.store.storeIdentifier(DIMENSION, networkId, player.getUniqueId().toString());
+        this.store.storeIdentifier(DIMENSION, networkId, Uuids.keyOf(player));
     }
 }

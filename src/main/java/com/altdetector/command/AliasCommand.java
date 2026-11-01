@@ -4,6 +4,7 @@ import cn.nukkit.command.Command;
 import cn.nukkit.command.CommandSender;
 import cn.nukkit.utils.TextFormat;
 import com.altdetector.AltDetector;
+import com.altdetector.util.Uuids;
 import com.altdetector.store.PlayerStore;
 
 import java.util.ArrayList;
@@ -12,7 +13,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * /alias（/al）命令：按玩家名 / uuid / xuid 查询全部维度的小号关联结果，
+ * /alias（/al）命令：按玩家名 / uuid 查询全部维度的小号关联结果，
  * 直接展示已持久化的数据（BlobCache 由进服自动探测落盘，无需查询时触发）。
  */
 public class AliasCommand extends Command {
@@ -21,7 +22,7 @@ public class AliasCommand extends Command {
     private final PlayerStore store;
 
     public AliasCommand(AltDetector plugin, PlayerStore store) {
-        super("alias", "Query a player's linked alt accounts", "/alias <player/uuid/xuid>", new String[]{"al"});
+        super("alias", "Query a player's linked alt accounts", "/alias <player/uuid>", new String[]{"al"});
         this.setPermission("altdetector.alias"); // plugin.yml 中 default: op，op 默认拥有
         this.plugin = plugin;
         this.store = store;
@@ -32,56 +33,60 @@ public class AliasCommand extends Command {
         if (!this.testPermission(sender)) return true;
         if (args.length < 1) {
             sender.sendMessage(TextFormat.YELLOW + "用法:");
-            sender.sendMessage(TextFormat.GRAY + "  /alias <玩家名/uuid/xuid>");
+            sender.sendMessage(TextFormat.GRAY + "  /alias <玩家名/uuid>");
             return true;
         }
 
         String target = args[0];
+        String wanted = Uuids.normalize(target);
 
-        List<String> targetUuids = new ArrayList<>();
-        if (target.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")) {
-            targetUuids.add(target.toLowerCase());
-        } else {
-            for (Map.Entry<String, Map<String, Object>> e : store.getPlayers().entrySet()) {
-                String uuid = e.getKey();
-                if (targetUuids.contains(uuid)) continue;
-                Map<String, Object> info = e.getValue();
-                Object xuidObj = info.get("xuid");
-                if (xuidObj != null && String.valueOf(xuidObj).equalsIgnoreCase(target)) {
-                    targetUuids.add(uuid);
-                    continue;
-                }
-                Object aliases = info.get("aliases");
-                if (aliases instanceof List) {
-                    for (Object a : (List<?>) aliases) {
-                        if (String.valueOf(a).equalsIgnoreCase(target)) {
-                            targetUuids.add(uuid);
-                            break;
-                        }
+        // 先刷新磁盘再解析：宁可多读一次盘，也不要读到旧副本
+        store.reload();
+
+        List<String> targetKeys = new ArrayList<>();
+        Map<String, Map<String, Object>> players = store.getPlayers();
+        // 1) 参数就是存储键（玩家 uuid）
+        if (players.containsKey(wanted)) targetKeys.add(wanted);
+        // 2) 退化匹配：记录的 uuid 字段、历史名字——改名或老数据下仍能查到
+        for (Map.Entry<String, Map<String, Object>> e : players.entrySet()) {
+            String key = e.getKey();
+            if (targetKeys.contains(key)) continue;
+            Map<String, Object> info = e.getValue();
+            if (wanted.equals(Uuids.normalize(stringOf(info.get("uuid"))))) {
+                targetKeys.add(key);
+                continue;
+            }
+            Object aliases = info.get("aliases");
+            if (aliases instanceof List) {
+                for (Object a : (List<?>) aliases) {
+                    if (String.valueOf(a).equalsIgnoreCase(target)) {
+                        targetKeys.add(key);
+                        break;
                     }
                 }
             }
         }
 
-        if (targetUuids.isEmpty()) {
+        if (targetKeys.isEmpty()) {
             sender.sendMessage(TextFormat.RED + "Player not found " + target);
             return true;
         }
 
-        store.reload();
-
         boolean first = true;
-        for (String uuid : targetUuids) {
+        for (String key : targetKeys) {
             if (!first) sender.sendMessage("");
             first = false;
-            showAliasResult(sender, uuid);
+            showAliasResult(sender, key);
         }
         return true;
     }
 
+    private static String stringOf(Object o) {
+        return o == null ? "" : String.valueOf(o);
+    }
+
     private void showAliasResult(CommandSender sender, String targetUuid) {
-        Map<String, Map<String, Object>> players = store.getPlayers();
-        Map<String, Object> targetInfo = players.get(targetUuid);
+        Map<String, Object> targetInfo = store.getPlayer(targetUuid);
         String targetName = targetInfo != null ? String.valueOf(targetInfo.get("name")) : targetUuid;
         String display = store.getDisplayIdentifier(targetUuid);
         boolean spoof = store.isSpoofFlagged(targetUuid);
@@ -104,18 +109,19 @@ public class AliasCommand extends Command {
                 || !blobRelated.isEmpty() || spoof;
 
         if (hasAny) {
+            Map<String, Integer> nameDup = store.buildNameCollisionMap();
             if (!deviceMatches.isEmpty())
-                sender.sendMessage("§l§cDeviceId: §r§7" + formatUuids(deviceMatches));
+                sender.sendMessage("§l§cDeviceId: §r§7" + formatUuids(deviceMatches, nameDup));
             if (!selfMatches.isEmpty())
-                sender.sendMessage("§l§cSelfSignedId: §r§7" + formatUuids(selfMatches));
+                sender.sendMessage("§l§cSelfSignedId: §r§7" + formatUuids(selfMatches, nameDup));
             if (!clientMatches.isEmpty())
-                sender.sendMessage("§l§cClientRandomId: §r§7" + formatUuids(clientMatches));
+                sender.sendMessage("§l§cClientRandomId: §r§7" + formatUuids(clientMatches, nameDup));
             if (!networkMatches.isEmpty())
-                sender.sendMessage("§l§cNetworkID: §r§7" + formatUuids(networkMatches));
+                sender.sendMessage("§l§cNetworkID: §r§7" + formatUuids(networkMatches, nameDup));
             if (!packMatches.isEmpty())
-                sender.sendMessage("§l§cResPackCache: §r§7" + formatUuids(packMatches));
+                sender.sendMessage("§l§cResPackCache by §r§7" + formatUuids(packMatches, nameDup));
             if (!blobRelated.isEmpty())
-                sender.sendMessage("§l§cBlobCache: §r§7" + formatUuids(blobRelated));
+                sender.sendMessage("§l§cBlobCache by §r§7" + formatUuids(blobRelated, nameDup));
             if (spoof)
                 sender.sendMessage("§l§cResourcePackSpoof detected");
         } else {
@@ -123,13 +129,12 @@ public class AliasCommand extends Command {
         }
     }
 
-    private String formatUuids(Set<String> uuids) {
-        Map<String, Integer> nameDup = store.buildNameCollisionMap();
+    private String formatUuids(Set<String> uuids, Map<String, Integer> nameDup) {
         List<String> list = new ArrayList<>();
         for (String uuid : uuids) {
-            Map<String, Object> info = store.getPlayers().get(uuid);
+            Map<String, Object> info = store.getPlayer(uuid);
             String name = info != null ? String.valueOf(info.get("name")) : uuid;
-            // 无重名：只显示名字提升可读性；全服同名（忽略大小写）账号 >1 时附带 xuid/uuid 消歧
+            // 无重名：只显示名字提升可读性；全服同名（忽略大小写）账号 >1 时附带 uuid 消歧
             if (info != null && nameDup.getOrDefault(name.toLowerCase(), 0) > 1)
                 list.add(name + " (" + store.getDisplayIdentifier(uuid) + ")");
             else
