@@ -263,7 +263,7 @@ public class PackDetector implements Listener {
 
         pendingReconnect.put(playerUuidStr, System.currentTimeMillis());
         sentPacks.remove(player.getUniqueId());
-        player.kick("请重新进入服务器完成初始化", false);
+        player.kick("Rejoin the server to complete initialization.", false);
     }
 
     /* ================================================================== */
