@@ -1,6 +1,6 @@
 name: Alias+
 main: com.altdetector.AltDetector
-version: "1.0.5"
+version: "1.0.6"
 api: ["1.0.0"]
 author: u5er
 load: POSTWORLD

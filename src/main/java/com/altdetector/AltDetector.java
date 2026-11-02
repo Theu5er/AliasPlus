@@ -80,6 +80,7 @@ public class AltDetector extends PluginBase implements Listener {
         this.store = new PlayerStore(playersConfig);
         this.store.migrateLegacyStorage();
         this.store.normalizePlayers();
+        this.store.purgeSpoofFlags();
 
         this.blobDetector = new BlobDetector(this, store);
         this.blobDetector.loadData();
@@ -94,6 +95,7 @@ public class AltDetector extends PluginBase implements Listener {
 
         this.getServer().getPluginManager().registerEvents(this, this);
         this.getServer().getPluginManager().registerEvents(this.packDetector, this);
+        this.getServer().getPluginManager().registerEvents(this.packDetector.getDownloadShim(), this);
         this.getServer().getPluginManager().registerEvents(this.blobDetector, this);
         this.getServer().getPluginManager().registerEvents(this.networkIdDetector, this);
 

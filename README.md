@@ -14,6 +14,10 @@ We have more detection methods than similar plugins, so the average spoofer is n
 **High Accuracy**
 Detection does not rely on non-unique evidence like IP; results can be used for bans directly.
 
+🤫
+**Silent Detection**
+Detection is almost completely silent and supports delayed punishments—cheaters have no idea why they got banned.
+
 🔗
 **Developer API**
 We provide query and punishment APIs, allowing you to ban all alt accounts with one call.
@@ -24,10 +28,10 @@ Alias+ currently checks:
 
 - `DeviceId`
 - `ClientRandomId`
-- `SelfSignedId` (maybe unavailable now)
-- `NetworkID` (NetherNet clients only)
-- Resource Pack Cache
-- Blob Cache
+- `SelfSignedId`
+- `NetworkID`
+- `Resource Pack Cache`
+- `Blob Cache`
 
 **Usage:**
 
@@ -41,7 +45,7 @@ Enable `nethernet` in the `nukkit-mot.yml` file.
 Example output:
 
 ```
---ExampleAcc's accounts (xuid: 123456)--
+--Example's accounts (uuid: 123456)--
 DeviceId: ExampleAcc
 ClientRandomId: ExampleAcc
 NetworkID: ExampleAcc

@@ -17,9 +17,8 @@ import java.util.UUID;
  * <pre>
  * name / aliases / uuid —— 身份（uuid 即存储键）
  * ids: {device, selfSigned, clientRandom, networkid} —— 登录标识符与 NetherNet NetworkID
- * pack: {uuid, claimed_by}     —— 资源包指纹与命中者
+ * pack: {uuid, confirmed, claimed_by} —— 资源包指纹、下载确认与命中者
  * blob: {id, claimed_by}       —— Blob 指纹与命中者
- * ResourcePackSpoof            —— 客户端谎报缓存标记
  * </pre>
  *
  * <p>写操作先 {@code reload()} 再 {@code save()}；只读操作返回副本，调用方改动不影响磁盘。
@@ -95,7 +94,6 @@ public class PlayerStore {
         info.put("name", "");
         info.put("aliases", new ArrayList<>());
         info.put("uuid", "");
-        info.put("ResourcePackSpoof", false);
         info.put("Punished", false);
         info.put("ids", new LinkedHashMap<>());
         info.put("pack", new LinkedHashMap<>());
@@ -212,7 +210,6 @@ public class PlayerStore {
             if (!info.containsKey("name")) { info.put("name", ""); changed = true; }
             if (!info.containsKey("aliases")) { info.put("aliases", new ArrayList<>()); changed = true; }
             if (!info.containsKey("uuid")) { info.put("uuid", ""); changed = true; }
-            if (!info.containsKey("ResourcePackSpoof")) { info.put("ResourcePackSpoof", false); changed = true; }
             if (!info.containsKey("Punished")) { info.put("Punished", false); changed = true; }
             if (!info.containsKey("ids")) { info.put("ids", new LinkedHashMap<>()); changed = true; }
             if (!info.containsKey("pack")) { info.put("pack", new LinkedHashMap<>()); changed = true; }
@@ -339,7 +336,6 @@ public class PlayerStore {
             List<String> aliases = new ArrayList<>();
             if (aliasesObj instanceof List) for (Object o : (List<?>) aliasesObj) aliases.add(String.valueOf(o));
             if (!aliases.contains(playerName)) { aliases.add(playerName); info.put("aliases", aliases); changed = true; }
-            if (!info.containsKey("ResourcePackSpoof")) { info.put("ResourcePackSpoof", false); changed = true; }
             if (!info.containsKey("Punished")) { info.put("Punished", false); changed = true; }
         }
 
@@ -400,35 +396,47 @@ public class PlayerStore {
         return true;
     }
 
-    /* ================================================================== */
-    /*  Spoof 标记                                                        */
-    /* ================================================================== */
-
-    public boolean isSpoofFlagged(String playerUuid) {
-        Map<String, Object> info = getPlayer(playerUuid);
+    /** 客户端是否真的把他自己的指纹包下载完了。 */
+    public boolean isPackConfirmed(String playerUuid) {
+        Map<String, Object> info = getPlayer(Uuids.normalize(playerUuid));
         if (info == null) return false;
-        Object flag = info.get("ResourcePackSpoof");
-        if (flag instanceof Boolean) return (Boolean) flag;
-        return "true".equalsIgnoreCase(String.valueOf(flag));
+        Map<String, Object> pack = resolveNested(info, "pack");
+        Object c = pack.get("confirmed");
+        if (c instanceof Boolean) return (Boolean) c;
+        return "true".equalsIgnoreCase(String.valueOf(c));
     }
 
-    public void markSpoof(String playerUuid) {
-        Map<String, Map<String, Object>> players = getPlayers();
-        Map<String, Object> info = players.get(playerUuid);
-        if (info == null) {
-            info = newPlayerRecordFor(playerUuid);
-            info.put("name", playerUuid);
-            players.put(playerUuid, info);
-        }
-        Object current = info.get("ResourcePackSpoof");
-        boolean already = current instanceof Boolean ? (Boolean) current
-                : "true".equalsIgnoreCase(String.valueOf(current));
-        if (already) return;
-        info.put("ResourcePackSpoof", true);
-        players.put(playerUuid, info);
+    /** 客户端下载完指纹包后置位；之后登录不再重新走初始化。 */
+    public void markPackConfirmed(String playerUuid) {
+        String key = Uuids.normalize(playerUuid);
         playersConfig.reload();
+        Map<String, Map<String, Object>> players = getPlayers();
+        Map<String, Object> info = players.get(key);
+        if (info == null) return;
+        Map<String, Object> pack = resolveNested(info, "pack");
+        Object c = pack.get("confirmed");
+        if (c instanceof Boolean && (Boolean) c) return;
+        pack.put("confirmed", true);
         playersConfig.set("players", players);
         playersConfig.save();
+    }
+
+    /* ================================================================== */
+    /*  旧字段清理（ResourcePackSpoof 已由直接断连取代）                    */
+    /* ================================================================== */
+
+    /** 删掉历史记录里的 ResourcePackSpoof 字段，返回是否改动过。 */
+    public boolean purgeSpoofFlags() {
+        Map<String, Map<String, Object>> players = getPlayers();
+        boolean changed = false;
+        for (Map<String, Object> info : players.values()) {
+            if (info.remove("ResourcePackSpoof") != null) changed = true;
+        }
+        if (changed) {
+            playersConfig.set("players", players);
+            playersConfig.save();
+        }
+        return changed;
     }
 
     /* ================================================================== */
@@ -518,9 +526,7 @@ public class PlayerStore {
             }
         }
         // 宁严勿松：丢标记等于放过已确认的小号
-        for (String flag : new String[]{"ResourcePackSpoof", "Punished"}) {
-            if (asBoolean(source.get(flag))) target.put(flag, true);
-        }
+        if (asBoolean(source.get("Punished"))) target.put("Punished", true);
     }
 
     /** claim 引用重写：键改名后其他账号的命中列表仍写着老键，必须同步搬走。 */

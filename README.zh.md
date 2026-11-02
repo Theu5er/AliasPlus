@@ -14,6 +14,10 @@
 **高准确度**
 检测不依赖 IP 等非唯一证据，结果可直接用于封禁。
 
+🤫
+**静默检测**
+检测几乎完全静默，并支持延迟惩罚，开小号的人根本不知道自己为什么被封。
+
 🔗
 **开发接口**
 我们提供查询与惩罚接口，可一键封禁所有小号。
@@ -24,10 +28,10 @@ Alias+ 目前检测：
 
 - `DeviceId`
 - `ClientRandomId`
-- `SelfSignedId`（目前可能已失效）
-- `NetworkID`（仅限 NetherNet 客户端）
-- 资源包缓存
-- Blob Cache
+- `SelfSignedId`
+- `NetworkID`
+- `Resource Pack Cache`
+- `Blob Cache`
 
 **使用：**
 
@@ -41,7 +45,7 @@ Alias+ 目前检测：
 输出示例：
 
 ```
---ExampleAcc's accounts (xuid: 123456)--
+--Example's accounts (uuid: 123456)--
 DeviceId: ExampleAcc
 ClientRandomId: ExampleAcc
 NetworkID: ExampleAcc

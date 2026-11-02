@@ -89,7 +89,6 @@ public class AliasCommand extends Command {
         Map<String, Object> targetInfo = store.getPlayer(targetUuid);
         String targetName = targetInfo != null ? String.valueOf(targetInfo.get("name")) : targetUuid;
         String display = store.getDisplayIdentifier(targetUuid);
-        boolean spoof = store.isSpoofFlagged(targetUuid);
 
         // 与开发者 API（AltDetector#getRelatedAccounts）共用同一查询入口，保证 /alias 输出与 API 结果一致
         Map<String, Set<String>> related = plugin.getRelatedByDimension(targetUuid);
@@ -106,7 +105,7 @@ public class AliasCommand extends Command {
 
         boolean hasAny = !deviceMatches.isEmpty() || !selfMatches.isEmpty()
                 || !clientMatches.isEmpty() || !networkMatches.isEmpty() || !packMatches.isEmpty()
-                || !blobRelated.isEmpty() || spoof;
+                || !blobRelated.isEmpty();
 
         if (hasAny) {
             Map<String, Integer> nameDup = store.buildNameCollisionMap();
@@ -122,8 +121,6 @@ public class AliasCommand extends Command {
                 sender.sendMessage("§l§cResPackCache by §r§7" + formatUuids(packMatches, nameDup));
             if (!blobRelated.isEmpty())
                 sender.sendMessage("§l§cBlobCache by §r§7" + formatUuids(blobRelated, nameDup));
-            if (spoof)
-                sender.sendMessage("§l§cResourcePackSpoof detected");
         } else {
             sender.sendMessage("§l§cNothing found :(");
         }
