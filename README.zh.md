@@ -49,8 +49,8 @@ Alias+ 目前检测：
 DeviceId: ExampleAcc
 ClientRandomId: ExampleAcc
 NetworkID: ExampleAcc
-ResPackCache: ExampleAcc
-BlobCache: ExampleAcc
+ResPackCache By: ExampleAcc
+BlobCache By: ExampleAcc
 ```
 
 ## 配置（`config.yml`）
@@ -71,7 +71,7 @@ BlobCache: ExampleAcc
 
 本项目为 vibe coding 辅助完成的技术演示，可能存在 bug，请勿在成品服务器上使用。
 
-ResPackCache 与 BlobCache 的输出存在被伪造的可能，但必要时可以直接封禁返回的所有账号，因为它们只可能是小号或作弊者。
+由于 `ResPackCache` 与 `BlobCache` 依赖于客户端回复，作弊者可以伪装成他人的账号，但是他们完全没有必要这么做：关联方向是单向性的（如果你没有关闭`strictmode`），如果他们意外伪装成了一个已经被封禁的玩家，他们也会被封禁。并且，如果他们自己想栽赃给别人，这也做不到。
 
 ## 开发者 API
 

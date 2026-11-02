@@ -49,8 +49,8 @@ Example output:
 DeviceId: ExampleAcc
 ClientRandomId: ExampleAcc
 NetworkID: ExampleAcc
-ResPackCache: ExampleAcc
-BlobCache: ExampleAcc
+ResPackCache By: ExampleAcc
+BlobCache By: ExampleAcc
 ```
 
 ## Configuration (`config.yml`)
@@ -71,7 +71,7 @@ All options are created with defaults on first launch; everything below is optio
 
 This project is a vibe-coding-assisted technical demo. It may contain bugs—do not use it on a production server.
 
-The ResPackCache and BlobCache output can potentially be spoofed, but when necessary, you can simply ban all accounts returned, since they can only be alt accounts or hackers.
+Since `ResPackCache` and `BlobCache` rely on client responses, cheaters can spoof other people's accounts, but there's really no need to: association is one-way (if you haven't disabled `strictmode`), and if they accidentally spoof a player who is already banned, they will be banned too. Also, if they want to frame someone else, that won't work either.
 
 ## Developer API
 
