@@ -39,7 +39,7 @@ Alias+ 目前检测：
 在 `nukkit-mot.yml` 文件中启用 `nethernet`。
 
 ```
-/alias <名称/uuid/xuid>
+/alias <名称/uuid>
 ```
 
 输出示例：

@@ -39,7 +39,7 @@ Enable `force-resources` in the `server.properties` file.
 Enable `nethernet` in the `nukkit-mot.yml` file.
 
 ```
-/alias <name/uuid/xuid>
+/alias <name/uuid>
 ```
 
 Example output:
