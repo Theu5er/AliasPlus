@@ -16,7 +16,7 @@ Detection does not rely on non-unique evidence like IP; results can be used for 
 
 🤫
 **Silent Detection**
-Detection is almost completely silent and supports delayed punishments—cheaters have no idea why they got banned.
+Detection is almost completely silent—cheaters have no idea why they got banned.
 
 🔗
 **Developer API**
@@ -33,45 +33,23 @@ Alias+ currently checks:
 - `Resource Pack Cache`
 - `Blob Cache`
 
+Every vector can be turned on or off in `config.yml` under `checks`. Two extra guards live there as well:
+
+- `DeviceIdFormat` — reject malformed `DeviceId` values: they are not stored and the account is punished
+- `ResourcePackSpoof` — disconnect and punish clients that claim to already hold the pack just assigned to them; only effective while `ResourcePackCache` is enabled
+
 **Usage:**
 
-Enable `force-resources` in the `server.properties` file.
+Enable `force-resources` in the `server.properties` file — without it the resource pack vector is disabled at startup and a warning is logged.
 Enable `nethernet` in the `nukkit-mot.yml` file.
 
 ```
 /alias <name/uuid>
 ```
 
-Example output:
-
-```
---Example's accounts (uuid: 123456)--
-DeviceId: ExampleAcc
-ClientRandomId: ExampleAcc
-NetworkID: ExampleAcc
-ResPackCache By: ExampleAcc
-BlobCache By: ExampleAcc
-```
-
-## Configuration (`config.yml`)
-
-All options are created with defaults on first launch; everything below is optional.
-
-| Option | Default | Description |
-|---|---|---|
-| `packcache-enabled` | `true` | Enable the resource pack cache detection dimension |
-| `blobcache-enabled` | `true` | Enable the blob cache detection dimension |
-| `networkid-enabled` | `true` | Enable the NetherNet NetworkID detection dimension (NetherNet/WebRTC clients only; RakNet connections carry no NetworkID and are skipped silently) |
-| `strictmode` | `true` | Association direction. `true` = one-way (only show who cached/hit the target's fingerprints); `false` = two-way (also show whose fingerprints the target cached/hit). ⚠️ Two-way mode allows spoofed hits to frame innocent players via punishment chaining. |
-| `punish-command` | `ban %player% Alt account detected` | Punishment command template, executed as console. Placeholders: `%player%` = player name, `%uuid%` = player uuid |
-| `punish-delay-min` | `5` | Minimum random delay for delayed bans (seconds, rolled independently per account) |
-| `punish-delay-max` | `30` | Maximum random delay for delayed bans (seconds, rolled independently per account) |
-
 **Notes:**
 
 This project is a vibe-coding-assisted technical demo. It may contain bugs—do not use it on a production server.
-
-Since `ResPackCache` and `BlobCache` rely on client responses, cheaters can spoof other people's accounts, but there's really no need to: association is one-way (if you haven't disabled `strictmode`), and if they accidentally spoof a player who is already banned, they will be banned too. Also, if they want to frame someone else, that won't work either.
 
 ## Developer API
 
@@ -86,17 +64,16 @@ AltDetector alias = (AltDetector) getServer().getPluginManager().getPlugin("Alia
 ### Punish API
 
 ```java
-int count = alias.punish(uuid, delayed);
+int count = alias.punish(uuid);
 ```
 
 - `uuid`: player uuid string (`player.getUniqueId().toString()`)
-- `delayed`: `true` for delayed ban / `false` for immediate ban
-- Returns: number of accounts queued (the target itself + all related alt accounts, deduplicated)
-- Punishment command and delay range are configured in `config.yml`: `punish-command` (placeholders `%player%`, `%uuid%`), `punish-delay-min`, `punish-delay-max` (seconds)
+- Returns: number of accounts added to the punishment queue (the target itself + all related alt accounts, deduplicated)
+- Punishment command is configured in `config.yml`: `punish.command` (placeholders `%player%`, `%uuid%`)
 
 ### Query API
 
 ```java
 Set<String> alts = alias.getRelatedAccounts(uuid);                  // all related alt uuids
-Map<String, Set<String>> byDim = alias.getRelatedByDimension(uuid); // by dimension (device/selfSigned/clientRandom/networkid/pack/blob)
+Map<String, Set<String>> byDim = alias.getRelatedByDimension(uuid); // by dimension (DeviceId/SelfSignedId/ClientRandomId/NetworkID/pack/blob)
 ```

@@ -1,0 +1,23 @@
+checks:
+  DeviceId: true
+  DeviceIdFormat: true
+  SelfSignedId: true
+  ClientRandomId: true
+  NetworkID: true       # Only for clients that support NetherNet and when NetherNet is enabled
+  ResourcePackCache: true
+  # Only effective when ResourcePackCache is true
+  ResourcePackSpoof: true
+  BlobCache: true
+
+strictmode: true
+# Strict mode
+#   true  = one-way: only show who cached/hit the target's fingerprints
+#   false = two-way: also show whose fingerprints the target cached/hit
+#
+# ResourcePackCache and BlobCache rely on client responses, so hits can be spoofed.
+# In practice this is harmless: association is one-way unless strictmode is off,
+# and a spoofed hit only ends up banning the spoofer, or a player already banned.
+
+punish:
+  # %player% = player name, %uuid% = player uuid
+  command: "ban %player% Alt account detected"

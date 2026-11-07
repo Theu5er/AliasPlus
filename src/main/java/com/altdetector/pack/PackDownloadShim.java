@@ -11,6 +11,7 @@ import cn.nukkit.network.protocol.ResourcePackDataInfoPacket;
 
 import java.security.MessageDigest;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -27,6 +28,13 @@ public class PackDownloadShim implements Listener {
 
     private final Map<UUID, byte[]> ownData = new ConcurrentHashMap<>();
     private final Map<UUID, byte[]> ownHash = new ConcurrentHashMap<>();
+    private final Set<UUID> fingerprintIds = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, Integer> maxChunks = new ConcurrentHashMap<>();
+
+    /** 登记指纹包 uuid，只有这些包的下载会被替换。 */
+    public void markFingerprint(UUID packId) {
+        if (packId != null) fingerprintIds.add(packId);
+    }
 
     /** 记录玩家自己的包，登录分发阶段调用。 */
     public void remember(Player player, FingerprintPack pack) {
@@ -59,6 +67,8 @@ public class PackDownloadShim implements Listener {
         DataPacket packet = event.getPacket();
         if (packet instanceof ResourcePackDataInfoPacket) {
             ResourcePackDataInfoPacket info = (ResourcePackDataInfoPacket) packet;
+            if (!fingerprintIds.contains(info.packId)) return;   // 服务器自己的资源包原样下发
+            maxChunks.put(info.packId, info.maxChunkSize);
             byte[] hash = ownHash.get(id);
             if (hash != null) info.sha256 = hash;
             info.compressedPackSize = data.length;
@@ -66,9 +76,12 @@ public class PackDownloadShim implements Listener {
             info.chunkCount = Math.max(1, (int) Math.ceil(data.length / (double) maxChunk));
         } else if (packet instanceof ResourcePackChunkDataPacket) {
             ResourcePackChunkDataPacket chunk = (ResourcePackChunkDataPacket) packet;
+            if (!fingerprintIds.contains(chunk.packId)) return;  // 同上
             int offset = (int) chunk.progress;
             if (offset < 0 || offset >= data.length) return;
-            int len = Math.min(chunk.data == null ? data.length - offset : chunk.data.length, data.length - offset);
+            // 分片长度必须按我们自己声明的 size 算，不能沿用原包的分片长度
+            int max = maxChunks.getOrDefault(chunk.packId, data.length);
+            int len = Math.min(max, data.length - offset);
             byte[] out = new byte[len];
             System.arraycopy(data, offset, out, 0, len);
             chunk.data = out;

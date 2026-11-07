@@ -16,7 +16,6 @@ import com.altdetector.store.PlayerStore;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -26,10 +25,9 @@ import java.util.UUID;
 /**
  * 资源包指纹维度检测。
  *
- * <p>流程：新玩家首次连接收到全部已分配指纹包 → 按客户端响应记录缓存命中（该设备玩过
- * 哪些账号）→ {@code assignPackAndDisconnect} 分配专属包并踢出重连 → 重连在
- * {@link #RECONNECT_WINDOW_MS} 窗口内走 waitingComplete 路径（发自己的包，
- * HAVE_ALL/COMPLETED 后清除标记放行，不再踢）。
+ * <p>流程：玩家首次连接收到全部已分配指纹包 → 按客户端响应记录缓存命中（该设备玩过
+ * 哪些账号）→ {@code assignPack} 分配专属包并记住，下载阶段用他自己的包顶替数据，
+ * 客户端据此把清单里的每个 uuid 都存下来。客户端回 HAVE_ALL_PACKS 直接断开。
  *
  * <p>身份切换兜底：MOT 对 Xbox 验签失败的连接改用"OfflinePlayer:名字"派生的离线 UUID，
  * 验签成功则用认证 UUID。首次检测若发生在未认证连接上，壳记录挂在旧 UUID 名下；重连一旦
@@ -38,13 +36,9 @@ import java.util.UUID;
  */
 public class PackDetector implements Listener {
 
-    private static final long RECONNECT_WINDOW_MS = 60000;
-
     private final AltDetector plugin;
     private final PlayerStore store;
 
-    private final Map<String, Long> pendingReconnect = new HashMap<>();
-    private final Set<UUID> waitingComplete = new java.util.HashSet<>();
     private final Map<UUID, List<String>> sentPacks = new HashMap<>();
     private final Map<String, FingerprintPack> packCache = new HashMap<>();
     private final PackDownloadShim downloadShim = new PackDownloadShim();
@@ -61,9 +55,7 @@ public class PackDetector implements Listener {
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
-        UUID uuid = event.getPlayer().getUniqueId();
-        waitingComplete.remove(uuid);
-        sentPacks.remove(uuid);
+        sentPacks.remove(event.getPlayer().getUniqueId());
         downloadShim.forget(event.getPlayer());
     }
 
@@ -87,42 +79,21 @@ public class PackDetector implements Listener {
         Map<String, String> assignedPacks = store.getAssignedPacks();
         String playerPack = assignedPacks.get(playerUuidStr);
 
-        if (playerPack != null && !playerPack.isEmpty()) {
-            if (store.isPackConfirmed(playerUuidStr)) {
-                // 客户端确实把包下载完了：之后的登录只下发服务器自己的资源包
-                pendingReconnect.remove(playerUuidStr);
-                keepServerPacks(pk, null);
-                return;
-            }
-            Long t = pendingReconnect.get(playerUuidStr);
-            if (t != null && System.currentTimeMillis() - t < RECONNECT_WINDOW_MS) {
-                FingerprintPack pack = getOrCreatePack(playerPack);
-                waitingComplete.add(playerUuid);
-                sentPacks.put(playerUuid, new ArrayList<>(Collections.singletonList(playerPack)));
-                keepServerPacks(pk, pack);      // 服务器资源包 + 他自己的指纹包，等他下载完
-                return;
-            }
-            // 分配过包但客户端从没下载完（初始化中途掉线），往下重新走一遍检测
-            pendingReconnect.remove(playerUuidStr);
+        if (playerPack != null && !playerPack.isEmpty() && store.isPackConfirmed(playerUuidStr)) {
+            // 已经完成过初始化：只下发服务器自己的资源包
+            keepServerPacks(pk, null);
+            return;
         }
 
         // 身份切换兜底：MOT 对 Xbox 验签失败的连接改用"OfflinePlayer:名字"派生的离线 UUID，
-        // 验签成功则用认证 UUID。首次检测若发生在未认证连接上，壳记录和重连标记都挂在旧 UUID
-        // 名下；重连一旦认证成功，这里按 UUID 就查不到 pack，会 fall-through 把玩家再踢一次
-        // （表现为"偶尔初始化两次"+残留空壳记录）。因此按名字收养空壳记录（aliases 为空，
-        // 即从未完成登录的），直接走重连放行路径。只收养空壳：撞上正常同名记录的
-        // 玩家仍走常规检测，不产生绕过盲区。
+        // 验签成功则用认证 UUID。首次检测若发生在未认证连接上，壳记录挂在旧 UUID 名下；
+        // 重连一旦认证成功，这里按 UUID 就查不到 pack，会 fall-through 再初始化一次。
+        // 因此按名字收养空壳记录（aliases 为空，即从未完成登录的），按已初始化放行。
         if (playerPack == null || playerPack.isEmpty()) {
             String adopted = store.findAdoptableShellPack(player.getName(), playerUuidStr);
             if (adopted != null) {
-                FingerprintPack pack = getOrCreatePack(adopted);
-                if (pack != null) {
-                    pendingReconnect.put(playerUuidStr, System.currentTimeMillis());
-                    waitingComplete.add(playerUuid);
-                    sentPacks.put(playerUuid, new ArrayList<>(Collections.singletonList(adopted)));
-                    keepServerPacks(pk, pack);      // 服务器资源包 + 收养到的指纹包
-                    return;
-                }
+                keepServerPacks(pk, null);
+                return;
             }
         }
 
@@ -189,32 +160,30 @@ public class PackDetector implements Listener {
 
         byte status = rp.responseStatus;
 
-        if (waitingComplete.contains(playerUuid)) {
-            if (status == ResourcePackClientResponsePacket.STATUS_HAVE_ALL_PACKS
-                    || status == ResourcePackClientResponsePacket.STATUS_COMPLETED) {
-                waitingComplete.remove(playerUuid);
-                sentPacks.remove(playerUuid);
-                pendingReconnect.remove(playerUuidStr);
+        List<String> sentList = sentPacks.get(playerUuid);
+        if (sentList == null) {
+            // 这一连接没下发指纹包；客户端报下载完成，说明它确实把包拿全了
+            if (status == ResourcePackClientResponsePacket.STATUS_COMPLETED
+                    && !store.isPackConfirmed(playerUuidStr)) {
                 store.markPackConfirmed(playerUuidStr);
             }
             return;
         }
 
-        List<String> sentList = sentPacks.get(playerUuid);
-        if (sentList == null) return;
-
         if (sentList.isEmpty()) {
             if (status == ResourcePackClientResponsePacket.STATUS_HAVE_ALL_PACKS
                     || status == ResourcePackClientResponsePacket.STATUS_COMPLETED
                     || status == ResourcePackClientResponsePacket.STATUS_SEND_PACKS) {
-                assignPackAndDisconnect(player, playerUuidStr);
+                assignPack(player, playerUuidStr);
             }
             return;
         }
 
         if (status == ResourcePackClientResponsePacket.STATUS_HAVE_ALL_PACKS) {
-            // 客户端声称持有刚分配给他的包，只可能是谎报，直接断开
             sentPacks.remove(playerUuid);
+            if (!plugin.resourcePackSpoofEnabled()) return; // 检测关闭：交给 Nukkit 放行
+            // 客户端声称持有刚分配给他的包，只可能是谎报：先触发惩罚，再断开
+            plugin.punish(playerUuidStr);
             player.close();
             return;
         }
@@ -232,7 +201,7 @@ public class PackDetector implements Listener {
                         store.addPackClaim(playerUuidStr, ownerUuid);
                 }
             }
-            assignPackAndDisconnect(player, playerUuidStr);
+            assignPack(player, playerUuidStr);
             return;
         }
 
@@ -273,11 +242,11 @@ public class PackDetector implements Listener {
         return null;
     }
 
-    private void assignPackAndDisconnect(Player player, String playerUuidStr) {
+    /* 首次检测通过：分配专属包并记住，下载阶段统一用它顶替 */
+    private void assignPack(Player player, String playerUuidStr) {
         String packUuid = store.ensurePackAssigned(playerUuidStr, player.getName());
         FingerprintPack pack = getOrCreatePack(packUuid);
 
-        // 测试版：记住他自己的包，下载阶段一律用它的数据顶替；不踢，让客户端走完下载
         downloadShim.remember(player, pack);
         sentPacks.remove(player.getUniqueId());
     }
@@ -292,6 +261,7 @@ public class PackDetector implements Listener {
         int stableIndex = Math.abs(packUuid.hashCode());
         FingerprintPack pack = new FingerprintPack(UUID.fromString(packUuid), stableIndex);
         packCache.put(packUuid, pack);
+        downloadShim.markFingerprint(pack.getPackId());
         registerPackWithManager(pack);
         return pack;
     }

@@ -280,17 +280,6 @@ public class PlayerStore {
     /*  身份档案与标识符写入                                                */
     /* ================================================================== */
 
-    /** 写入/更新玩家档案；返回被并入当前 uuid 的老键（老版本遗留），非 null 时调用方需重载 claim 内存副本。 */
-    public String storePlayerProfile(String playerUuid, String playerName) {
-        Map<String, Map<String, Object>> players = getPlayers();
-        ProfileWrite w = applyProfile(players, Uuids.normalize(playerUuid), playerName);
-        if (w.changed) {
-            playersConfig.set("players", players);
-            playersConfig.save();
-        }
-        return w.adopted;
-    }
-
     /** 一次落盘写完整条登录：档案 + 登录时抓到的全部标识符。 */
     public String storeLogin(String playerUuid, String playerName, Map<String, String> identifiers) {
         playersConfig.reload();
@@ -730,14 +719,6 @@ public class PlayerStore {
     /* ================================================================== */
     /*  展示辅助                                                          */
     /* ================================================================== */
-
-    /** 存量记录兼容读取：仅用于 /alias 排序，新记录不再写入该字段。 */
-    public long lastMs(String uuid) {
-        Map<String, Object> p = getPlayer(uuid);
-        if (p == null) return 0L;
-        Object v = p.get("lastMs");
-        return v instanceof Number ? ((Number) v).longValue() : 0L;
-    }
 
     public String displayName(String uuid) {
         Map<String, Object> profile = getPlayer(uuid);

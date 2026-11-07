@@ -9,6 +9,8 @@ import cn.nukkit.utils.Config;
 import cn.nukkit.utils.LoginChainData;
 import com.altdetector.blob.BlobDetector;
 import com.altdetector.command.AliasCommand;
+import com.altdetector.identity.DeviceIdFormat;
+import com.altdetector.util.Hashes;
 import com.altdetector.util.Uuids;
 import com.altdetector.net.NetworkIdDetector;
 import com.altdetector.pack.PackDetector;
@@ -45,15 +47,14 @@ import java.util.Set;
  */
 public class AltDetector extends PluginBase implements Listener {
 
-    /* 首次连接被踢时显示给玩家的默认提示 */
-    public static final String DEFAULT_INIT_MESSAGE = "Re-entering server to complete initialization";
-
     private Config config;
     private PlayerStore store;
     private NetworkIdDetector networkIdDetector;
     private PackDetector packDetector;
     private BlobDetector blobDetector;
     private PunishManager punishManager;
+    /* server.properties 的 force-resources；关掉时资源包不会被强制下载，检测无意义 */
+    private boolean packAllowedByServer = true;
 
     /* ================================================================== */
     /*  生命周期                                                           */
@@ -61,18 +62,20 @@ public class AltDetector extends PluginBase implements Listener {
 
     @Override
     public void onEnable() {
-        this.config = new Config(new File(this.getDataFolder(), "config.yml"), Config.YAML);
+        File cfgFile = new File(this.getDataFolder(), "config.yml");
+        if (!cfgFile.exists()) {
+            String lang = this.getServer().getPropertyString("language", "eng");
+            this.saveResource("chs".equalsIgnoreCase(lang) ? "config.zh.yml" : "config.yml", "config.yml", false);
+        }
+        this.config = new Config(cfgFile, Config.YAML);
         Config playersConfig = new Config(new File(this.getDataFolder(), "players.yml"), Config.YAML);
 
-        if (!config.exists("packcache-enabled")) config.set("packcache-enabled", true);
-        if (!config.exists("blobcache-enabled")) config.set("blobcache-enabled", true);
-        if (!config.exists("networkid-enabled")) config.set("networkid-enabled", true);
-        if (!config.exists("strictmode")) config.set("strictmode", true);
-        if (!config.exists("punish-command")) config.set("punish-command", "ban %player% Alt account detected");
-        if (!config.exists("punish-delay-min")) config.set("punish-delay-min", 5);
-        if (!config.exists("punish-delay-max")) config.set("punish-delay-max", 30);
-        if (!config.exists("init-message")) config.set("init-message", DEFAULT_INIT_MESSAGE);
-        config.save();
+        if (!this.config.exists("checks")) migrateLegacyKeys();
+
+        this.packAllowedByServer = this.getServer().getForceResources();
+        if (!this.packAllowedByServer) {
+            this.getLogger().warning("force-resources is off in server.properties; ResourcePackCache detection disabled");
+        }
 
         if (!playersConfig.exists("players")) playersConfig.set("players", new LinkedHashMap<>());
         playersConfig.save();
@@ -102,9 +105,23 @@ public class AltDetector extends PluginBase implements Listener {
         this.getServer().getCommandMap().register("alias", new AliasCommand(this, store));
     }
 
+    /* 老版本平铺配置 → 新结构：只写内存不落盘，避免覆盖带注释的模板 */
+    private void migrateLegacyKeys() {
+        config.set("checks.DeviceId", true);
+        config.set("checks.DeviceIdFormat", true);
+        config.set("checks.SelfSignedId", true);
+        config.set("checks.ClientRandomId", true);
+        config.set("checks.NetworkID", config.getBoolean("networkid-enabled", true));
+        config.set("checks.ResourcePackCache", config.getBoolean("packcache-enabled", true));
+        config.set("checks.BlobCache", config.getBoolean("blobcache-enabled", true));
+        config.set("checks.ResourcePackSpoof", true);
+        if (!config.exists("strictmode")) config.set("strictmode", true);
+        config.set("punish.command", config.getString("punish-command", "ban %player% Alt account detected"));
+    }
+
     @Override
     public void onDisable() {
-        // 服务器即将关闭：同步执行所有等待中的惩罚（含未到期的延迟惩罚），不丢失
+        // 服务器即将关闭：同步执行所有仍在队列中的惩罚，不丢失
         if (this.punishManager != null) this.punishManager.flushAll();
     }
 
@@ -113,19 +130,39 @@ public class AltDetector extends PluginBase implements Listener {
     /* ================================================================== */
 
     public boolean packEnabled() {
-        return this.config.getBoolean("packcache-enabled", true);
+        return this.packAllowedByServer && this.config.getBoolean("checks.ResourcePackCache", true);
     }
 
     public boolean blobEnabled() {
-        return this.config.getBoolean("blobcache-enabled", true);
+        return this.config.getBoolean("checks.BlobCache", true);
+    }
+
+    public boolean deviceEnabled() {
+        return this.config.getBoolean("checks.DeviceId", true);
+    }
+
+    public boolean deviceIdFormatEnabled() {
+        return this.config.getBoolean("checks.DeviceIdFormat", true);
+    }
+
+    public boolean resourcePackSpoofEnabled() {
+        return this.config.getBoolean("checks.ResourcePackSpoof", true);
+    }
+
+    public boolean selfSignedEnabled() {
+        return this.config.getBoolean("checks.SelfSignedId", true);
+    }
+
+    public boolean clientRandomEnabled() {
+        return this.config.getBoolean("checks.ClientRandomId", true);
     }
 
     /**
-     * NetworkID 维度开关：false 时登录不捕获 NetworkID（config.yml 的 networkid-enabled）。
+     * NetworkID 维度开关：false 时登录不捕获 NetworkID（config.yml 的 checks.NetworkID）。
      * 关闭后 /alias 的 NetworkID 行因无数据自然为空，历史数据保留不清除。
      */
     public boolean networkIdEnabled() {
-        return this.config.getBoolean("networkid-enabled", true);
+        return this.config.getBoolean("checks.NetworkID", true);
     }
 
     /**
@@ -141,26 +178,10 @@ public class AltDetector extends PluginBase implements Listener {
     /*  惩罚配置（供 PunishManager 查询）                                   */
     /* ================================================================== */
 
-    /** punish-command 命令模板，支持 %player% / %uuid% 占位符。 */
+    /** punish.command 命令模板，支持 %player% / %uuid% 占位符。 */
     public String getPunishCommand() {
-        String cmd = this.config.getString("punish-command", "ban %player% Alt account detected").trim();
+        String cmd = this.config.getString("punish.command", "ban %player% Alt account detected").trim();
         return cmd.isEmpty() ? "ban %player%" : cmd;
-    }
-
-    /** 延迟封禁最小间隔（秒）。 */
-    public int getPunishDelayMin() {
-        return this.config.getInt("punish-delay-min", 5);
-    }
-
-    /** 延迟封禁最大间隔（秒）。 */
-    public int getPunishDelayMax() {
-        return this.config.getInt("punish-delay-max", 30);
-    }
-
-    /** 首次连接被踢时显示给玩家的提示文本。 */
-    public String getInitMessage() {
-        String msg = this.config.getString("init-message", DEFAULT_INIT_MESSAGE);
-        return msg == null || msg.trim().isEmpty() ? DEFAULT_INIT_MESSAGE : msg;
     }
 
     /* ================================================================== */
@@ -179,7 +200,7 @@ public class AltDetector extends PluginBase implements Listener {
         Map<String, Map<String, List<String>>> ids = store.getIdentifiers();
         // networkid 与前三者同为"账号自身携带的标识符"（而非可被定向伪造的 claim），
         // 同值即关联；RakNet 玩家无此维度，数据稀疏属正常
-        for (String type : new String[]{"device", "selfSigned", "clientRandom", "networkid"}) {
+        for (String type : new String[]{"DeviceId", "SelfSignedId", "ClientRandomId", "NetworkID"}) {
             Set<String> matches = new LinkedHashSet<>();
             for (List<String> group : ids.getOrDefault(type, new LinkedHashMap<>()).values()) {
                 if (group.contains(targetUuid)) {
@@ -251,22 +272,18 @@ public class AltDetector extends PluginBase implements Listener {
      *
      * <p>执行方式由 config.yml 决定：
      * <ul>
-     *   <li>{@code punish-command} —— 惩罚命令模板，占位符 {@code %player%}（玩家名）、
+     *   <li>{@code punish.command} —— 惩罚命令模板，占位符 {@code %player%}（玩家名）、
      *       {@code %uuid%}（玩家 uuid），以控制台身份执行；</li>
-     *   <li>{@code punish-delay-min} / {@code punish-delay-max} —— 延迟封禁的随机区间（秒）。</li>
      * </ul>
      *
      * <p>队列每 tick 只执行一条惩罚命令，直到全部处理完毕；服务器关闭时（onDisable）
-     * 所有尚未执行的惩罚（含等待延迟的）会同步执行完毕，不丢失。同一账号重复调用不会
-     * 重复入队。
+     * 所有尚未执行的惩罚会同步执行完毕，不丢失。同一账号重复调用不会重复入队。
      *
      * @param playerUuid 目标玩家 uuid（字符串形式）
-     * @param delayed    true = 每个账号在配置区间内独立随机延迟后封禁；
-     *                   false = 按入队顺序逐 tick 立即封禁
      * @return 本次实际加入惩罚队列的账号数（目标 + 关联小号，去重后）
      */
-    public int punish(String playerUuid, boolean delayed) {
-        return this.punishManager == null ? 0 : this.punishManager.punish(playerUuid, delayed);
+    public int punish(String playerUuid) {
+        return this.punishManager == null ? 0 : this.punishManager.punish(playerUuid);
     }
 
     /**
@@ -292,18 +309,31 @@ public class AltDetector extends PluginBase implements Listener {
 
         // 档案 + 登录标识符一次落盘：原来要写 4 次盘，语义不变
         Map<String, String> identifiers = new LinkedHashMap<>();
+        boolean badDeviceId = false;
         if (lcd != null) {
-            identifiers.put("device", lcd.getDeviceId());
-            identifiers.put("clientRandom", String.valueOf(lcd.getClientId()));
-            try {
-                JsonObject rawData = lcd.getRawData();
-                if (rawData != null && rawData.has("SelfSignedId") && !rawData.get("SelfSignedId").isJsonNull())
-                    identifiers.put("selfSigned", rawData.get("SelfSignedId").getAsString());
-            } catch (Exception ignored) {}
+            if (deviceEnabled()) {
+                String rawDevice = lcd.getDeviceId();
+                if (rawDevice != null && !rawDevice.isEmpty()) {
+                    if (deviceIdFormatEnabled() && !DeviceIdFormat.isValid(rawDevice)) {
+                        badDeviceId = true;
+                    } else {
+                        identifiers.put("DeviceId", Hashes.sha256(rawDevice));
+                    }
+                }
+            }
+            if (clientRandomEnabled()) identifiers.put("ClientRandomId", Hashes.sha256(String.valueOf(lcd.getClientId())));
+            if (selfSignedEnabled()) {
+                try {
+                    JsonObject rawData = lcd.getRawData();
+                    if (rawData != null && rawData.has("SelfSignedId") && !rawData.get("SelfSignedId").isJsonNull())
+                        identifiers.put("SelfSignedId", Hashes.sha256(rawData.get("SelfSignedId").getAsString()));
+                } catch (Exception ignored) {}
+            }
         }
 
         // 老键档案已并入 → 引用被重写，claim 内存副本要重载
         String adopted = store.storeLogin(key, playerName, identifiers);
         if (adopted != null && this.blobDetector != null) this.blobDetector.reloadClaims();
+        if (badDeviceId) this.punish(key);
     }
 }

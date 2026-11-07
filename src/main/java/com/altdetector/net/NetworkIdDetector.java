@@ -24,7 +24,7 @@ import com.altdetector.store.PlayerStore;
 public class NetworkIdDetector implements Listener {
 
     /** players.yml 中 ids 下的维度键，与 /alias 展示标签对应。 */
-    public static final String DIMENSION = "networkid";
+    public static final String DIMENSION = "NetworkID";
 
     private final AltDetector plugin;
     private final PlayerStore store;

@@ -1,0 +1,23 @@
+checks:
+  DeviceId: true
+  DeviceIdFormat: true
+  SelfSignedId: true
+  ClientRandomId: true
+  NetworkID: true       # 仅当客户端支持 NetherNet 且服务端启用 NetherNet 时有效
+  ResourcePackCache: true
+  # 仅在 ResourcePackCache 为 true 时生效
+  ResourcePackSpoof: true
+  BlobCache: true
+
+strictmode: true
+# 严格模式
+#   true  = 单向：只显示谁缓存/命中了目标玩家的指纹
+#   false = 双向：同时显示目标玩家缓存/命中了谁的指纹
+#
+# ResourcePackCache 与 BlobCache 依赖客户端回复，命中记录存在被伪造的可能。
+# 实践中影响不大：除非关闭严格模式，关联是单向的；伪造命中最终只会封掉伪造者自己，
+# 或者一个已经被封禁的账号。想栽赃别人也做不到。
+
+punish:
+  # %player% = 玩家名，%uuid% = 玩家 uuid
+  command: "ban %player% Alt account detected"

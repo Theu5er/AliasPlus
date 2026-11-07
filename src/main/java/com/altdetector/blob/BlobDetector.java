@@ -19,7 +19,6 @@ import cn.nukkit.network.protocol.SubChunkPacket;
 import cn.nukkit.network.protocol.SubChunkRequestPacket;
 import cn.nukkit.network.protocol.types.SubChunkRequestResult;
 import cn.nukkit.scheduler.TaskHandler;
-import cn.nukkit.utils.TextFormat;
 import com.altdetector.AltDetector;
 import com.altdetector.util.Uuids;
 import com.altdetector.protocol.ClientCacheBlobStatusPacket;
@@ -297,7 +296,7 @@ public class BlobDetector implements Listener {
         // 使该设备缓存住此账号的指纹，供之后同设备其他账号命中）
         List<Long> ids = new ArrayList<>();
         ids.add(ownId);
-        for (String other : this.recentOwners(Integer.MAX_VALUE)) {
+        for (String other : this.blobIds.keySet()) {
             if (other.equals(identityKey)) continue;
             Long id = this.parseBlobId(this.blobIds.get(other));
             if (id != null && !ids.contains(id)) ids.add(id);
@@ -341,7 +340,7 @@ public class BlobDetector implements Listener {
 
         // 检测结束：统一处理扫描期间登记的自动惩罚（此时全部 claim 已落盘，
         // punish 收集关联账号时不会漏掉本轮扫描的后发现的命中）
-        for (String claimer : this.autoPunishPending) plugin.punish(claimer, false);
+        for (String claimer : this.autoPunishPending) plugin.punish(claimer);
         this.autoPunishPending.clear();
     }
 
@@ -558,17 +557,6 @@ public class BlobDetector implements Listener {
         return owners;
     }
 
-    private List<String> recentOwners(int limit) {
-        List<String> all = new ArrayList<>(this.blobIds.keySet());
-        if (all.size() <= limit) return all;
-        List<String> sorted = new ArrayList<>(all);
-        sorted.sort((a, b) -> {
-            long la = this.store.lastMs(a), lb = this.store.lastMs(b);
-            if (la != lb) return Long.compare(lb, la);
-            return a.compareTo(b);
-        });
-        return sorted.subList(0, limit);
-    }
 
     /* ================================================================== */
     /*  工具                                                              */

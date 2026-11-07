@@ -41,7 +41,6 @@ public class AliasCommand extends Command {
         String wanted = Uuids.normalize(target);
 
         // 先刷新磁盘再解析：宁可多读一次盘，也不要读到旧副本
-        store.reload();
 
         List<String> targetKeys = new ArrayList<>();
         Map<String, Map<String, Object>> players = store.getPlayers();
@@ -92,11 +91,11 @@ public class AliasCommand extends Command {
 
         // 与开发者 API（AltDetector#getRelatedAccounts）共用同一查询入口，保证 /alias 输出与 API 结果一致
         Map<String, Set<String>> related = plugin.getRelatedByDimension(targetUuid);
-        Set<String> deviceMatches = related.get("device");
-        Set<String> selfMatches = related.get("selfSigned");
-        Set<String> clientMatches = related.get("clientRandom");
-        Set<String> networkMatches = related.get("networkid");
-        // ResPackCache 与 BlobCache 两行都展示"主账号"（目标命中了谁的指纹，即它挂在谁
+        Set<String> deviceMatches = related.get("DeviceId");
+        Set<String> selfMatches = related.get("SelfSignedId");
+        Set<String> clientMatches = related.get("ClientRandomId");
+        Set<String> networkMatches = related.get("NetworkID");
+        // ResourcePackCache 与 BlobCache 两行都展示"主账号"（目标命中了谁的指纹，即它挂在谁
         // 名下），与查询 API（getRelatedByDimension 的单向 pack/blob）方向不同，后者保持不变
         Set<String> packMatches = plugin.getPackMains(targetUuid);
         Set<String> blobRelated = plugin.getBlobMains(targetUuid);
@@ -118,7 +117,7 @@ public class AliasCommand extends Command {
             if (!networkMatches.isEmpty())
                 sender.sendMessage("§l§cNetworkID: §r§7" + formatUuids(networkMatches, nameDup));
             if (!packMatches.isEmpty())
-                sender.sendMessage("§l§cResPackCache by §r§7" + formatUuids(packMatches, nameDup));
+                sender.sendMessage("§l§cResourcePackCache by §r§7" + formatUuids(packMatches, nameDup));
             if (!blobRelated.isEmpty())
                 sender.sendMessage("§l§cBlobCache by §r§7" + formatUuids(blobRelated, nameDup));
         } else {

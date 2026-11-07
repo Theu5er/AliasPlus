@@ -16,7 +16,7 @@
 
 🤫
 **静默检测**
-检测几乎完全静默，并支持延迟惩罚，开小号的人根本不知道自己为什么被封。
+检测几乎完全静默，开小号的人根本不知道自己为什么被封。
 
 🔗
 **开发接口**
@@ -33,45 +33,23 @@ Alias+ 目前检测：
 - `Resource Pack Cache`
 - `Blob Cache`
 
+每个维度都可以在 `config.yml` 的 `checks` 下单独开关。另外还有两项校验开关：
+
+- `DeviceIdFormat` —— 拒绝格式非法的 `DeviceId`：不入库，并执行惩罚
+- `ResourcePackSpoof` —— 客户端声称已持有刚分配给它的包时，断开并惩罚；仅在 `ResourcePackCache` 开启时生效
+
 **使用：**
 
-在 `server.properties` 文件中启用 `force-resources`。
+在 `server.properties` 文件中启用 `force-resources`，否则资源包维度会在启动时自动禁用并输出一条警告。
 在 `nukkit-mot.yml` 文件中启用 `nethernet`。
 
 ```
 /alias <名称/uuid>
 ```
 
-输出示例：
-
-```
---Example's accounts (uuid: 123456)--
-DeviceId: ExampleAcc
-ClientRandomId: ExampleAcc
-NetworkID: ExampleAcc
-ResPackCache By: ExampleAcc
-BlobCache By: ExampleAcc
-```
-
-## 配置（`config.yml`）
-
-所有选项在首次启动时自动生成默认值，以下均为可选项。
-
-| 选项 | 默认值 | 说明 |
-|---|---|---|
-| `packcache-enabled` | `true` | 启用资源包缓存检测维度 |
-| `blobcache-enabled` | `true` | 启用 BlobCache 检测维度 |
-| `networkid-enabled` | `true` | 启用 NetherNet NetworkID 检测维度（仅限 NetherNet/WebRTC 客户端；RakNet 连接不携带 NetworkID，会静默跳过） |
-| `strictmode` | `true` | 关联方向。`true` = 单向（只显示谁缓存/命中了目标玩家的指纹）；`false` = 双向（同时显示目标玩家缓存/命中了谁的指纹）。⚠️ 双向模式可能因伪造命中，通过惩罚链误伤无辜玩家。 |
-| `punish-command` | `ban %player% Alt account detected` | 惩罚命令模板，以控制台身份执行。占位符：`%player%` = 玩家名，`%uuid%` = 玩家 uuid |
-| `punish-delay-min` | `5` | 延迟封禁的最小随机延迟（秒，每个账号独立随机） |
-| `punish-delay-max` | `30` | 延迟封禁的最大随机延迟（秒，每个账号独立随机） |
-
 **注意事项：**
 
 本项目为 vibe coding 辅助完成的技术演示，可能存在 bug，请勿在成品服务器上使用。
-
-由于 `ResPackCache` 与 `BlobCache` 依赖于客户端回复，作弊者可以伪装成他人的账号，但是他们完全没有必要这么做：关联方向是单向性的（如果你没有关闭`strictmode`），如果他们意外伪装成了一个已经被封禁的玩家，他们也会被封禁。并且，如果他们自己想栽赃给别人，这也做不到。
 
 ## 开发者 API
 
@@ -86,17 +64,16 @@ AltDetector alias = (AltDetector) getServer().getPluginManager().getPlugin("Alia
 ### 惩罚 API
 
 ```java
-int count = alias.punish(uuid, delayed);
+int count = alias.punish(uuid);
 ```
 
 - `uuid`：玩家 uuid 字符串（`player.getUniqueId().toString()`）
-- `delayed`：`true` 为延迟封禁 / `false` 为立即封禁
 - 返回值：加入惩罚队列的账号数量（目标本身 + 所有关联小号，已去重）
-- 惩罚命令与延迟范围在 `config.yml` 中配置：`punish-command`（占位符 `%player%`、`%uuid%`）、`punish-delay-min`、`punish-delay-max`（秒）
+- 惩罚命令在 `config.yml` 中配置：`punish.command`（占位符 `%player%`、`%uuid%`）
 
 ### 查询 API
 
 ```java
 Set<String> alts = alias.getRelatedAccounts(uuid);                  // 所有关联小号的 uuid
-Map<String, Set<String>> byDim = alias.getRelatedByDimension(uuid); // 按维度分组（device/selfSigned/clientRandom/networkid/pack/blob）
+Map<String, Set<String>> byDim = alias.getRelatedByDimension(uuid); // 按维度分组（DeviceId/SelfSignedId/ClientRandomId/NetworkID/pack/blob）
 ```
