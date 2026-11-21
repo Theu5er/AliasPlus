@@ -9,6 +9,14 @@ checks:
   ResourcePackSpoof: true
   BlobCache: true
 
+# 客户端资源包列表中显示的名称；图标读取插件目录下的 icon.png（可选）
+pack-name: "Test"
+
+# 指纹有效期（天）。0 = 永不过期，所有指纹一直参与检测
+expire:
+  ResourcePackCache: 7
+  BlobCache: 7
+
 strictmode: true
 # 严格模式
 #   true  = 单向：只显示谁缓存/命中了目标玩家的指纹

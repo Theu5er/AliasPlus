@@ -1,4 +1,4 @@
-package com.altdetector.pack;
+package com.altdetector.fingerprint;
 
 import cn.nukkit.Player;
 import cn.nukkit.event.EventHandler;

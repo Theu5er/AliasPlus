@@ -264,17 +264,6 @@ public class PlayerStore {
         return r;
     }
 
-    public Map<String, String> getAssignedPacks() {
-        Map<String, String> r = new LinkedHashMap<>();
-        for (Map.Entry<String, Map<String, Object>> pe : getPlayers().entrySet()) {
-            Map<String, Object> pack = asMap(pe.getValue().get("pack"));
-            if (pack == null) continue;
-            Object pu = pack.get("uuid");
-            if (pu != null && !String.valueOf(pu).isEmpty() && !"null".equalsIgnoreCase(String.valueOf(pu)))
-                r.put(pe.getKey(), String.valueOf(pu));
-        }
-        return r;
-    }
 
     /* ================================================================== */
     /*  身份档案与标识符写入                                                */
@@ -406,6 +395,124 @@ public class PlayerStore {
         Object c = pack.get("confirmed");
         if (c instanceof Boolean && (Boolean) c) return;
         pack.put("confirmed", true);
+        playersConfig.set("players", players);
+        playersConfig.save();
+    }
+
+    /* ================================================================== */
+    /*  指纹时效                                                          */
+    /* ================================================================== */
+
+    /** 同一条指纹的写盘间隔：一小时内重复刷新不重复落盘。 */
+    private static final long TOUCH_INTERVAL_MS = 3600_000L;
+
+
+    /** 资源包指纹是否仍在有效期内。ttlMs <= 0 表示不判过期；缺 ts 视为过期。 */
+    public boolean isPackFresh(String playerUuid, long ttlMs) {
+        if (ttlMs <= 0) return true;
+        Map<String, Object> info = getPlayer(Uuids.normalize(playerUuid));
+        return info != null && isFresh(asMap(info.get("pack")), ttlMs);
+    }
+
+    /** Blob 指纹是否仍在有效期内。 */
+    public boolean isBlobFresh(String playerUuid, long ttlMs) {
+        if (ttlMs <= 0) return true;
+        Map<String, Object> info = getPlayer(Uuids.normalize(playerUuid));
+        return info != null && isFresh(asMap(info.get("blob")), ttlMs);
+    }
+
+    /** 有效期内（或未启用时效）的资源包映射：owner uuid -> pack uuid。 */
+    @SuppressWarnings("unchecked")
+    public Map<String, String> getActivePacks(long ttlMs) {
+        Map<String, String> r = new LinkedHashMap<>();
+        Object raw = playersConfig.get("players");
+        if (!(raw instanceof Map)) return r;
+        // 只读不复制整表：逐条取 pack 段判断
+        for (Map.Entry<Object, Object> pe : ((Map<Object, Object>) raw).entrySet()) {
+            if (!(pe.getValue() instanceof Map)) continue;
+            Object packRaw = ((Map<Object, Object>) pe.getValue()).get("pack");
+            if (!(packRaw instanceof Map)) continue;
+            Map<Object, Object> pack = (Map<Object, Object>) packRaw;
+            Object pu = pack.get("uuid");
+            if (pu == null || String.valueOf(pu).isEmpty() || "null".equalsIgnoreCase(String.valueOf(pu))) continue;
+            if (ttlMs > 0 && !isFreshRaw(pack, ttlMs)) continue;
+            r.put(String.valueOf(pe.getKey()), String.valueOf(pu));
+        }
+        return r;
+    }
+
+    /**
+     * 删除尚未确认的资源包分配（首次检测没走完就断开时调用）。
+     *
+     * <p>只删 {@code pack} 段，玩家档案本身保留。下次登录会被当成新账号重新分配。
+     */
+    public boolean removeUnconfirmedPack(String playerUuid) {
+        String key = Uuids.normalize(playerUuid);
+        playersConfig.reload();
+        Map<String, Map<String, Object>> players = getPlayers();
+        Map<String, Object> info = players.get(key);
+        if (info == null || !(info.get("pack") instanceof Map)) return false;
+        info.remove("pack");
+        playersConfig.set("players", players);
+        playersConfig.save();
+        return true;
+    }
+
+    /** 进服时刷新资源包指纹的时效，写盘间隔见 {@link #TOUCH_INTERVAL_MS}。 */
+    public void touchPack(String playerUuid) {
+        touch(playerUuid, "pack");
+    }
+
+    /** 进服时刷新 Blob 指纹的时效。 */
+    public void touchBlob(String playerUuid) {
+        touch(playerUuid, "blob");
+    }
+
+    private boolean isFresh(Map<String, Object> section, long ttlMs) {
+        if (section == null) return false;
+        Object ts = section.get("ts");
+        if (ts == null) return false;
+        try {
+            return System.currentTimeMillis() - Long.parseLong(String.valueOf(ts)) <= ttlMs;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    private void touch(String playerUuid, String nested) {
+        String key = Uuids.normalize(playerUuid);
+        Map<String, Object> cached = getPlayer(key);
+        if (cached != null) {
+            Map<String, Object> section = asMap(cached.get(nested));
+            if (section == null || section.isEmpty()) return;   // 没有对应指纹，不创建空段
+            Object ts = section.get("ts");
+            if (ts != null) {
+                try {
+                    if (System.currentTimeMillis() - Long.parseLong(String.valueOf(ts)) < TOUCH_INTERVAL_MS) {
+                        return;                                     // 节流窗口内：不读盘、不复制
+                    }
+                } catch (NumberFormatException ignored) {
+                    // 脏数据：继续走覆盖流程
+                }
+            }
+        }
+        playersConfig.reload();
+        Map<String, Map<String, Object>> players = getPlayers();
+        Map<String, Object> info = players.get(key);
+        if (info == null) return;
+        Map<String, Object> exist = asMap(info.get(nested));
+        if (exist == null || exist.isEmpty()) return;   // 没有对应指纹，不创建空段
+        Map<String, Object> section = resolveNested(info, nested);
+        long now = System.currentTimeMillis();
+        Object old = section.get("ts");
+        if (old != null) {
+            try {
+                if (now - Long.parseLong(String.valueOf(old)) < TOUCH_INTERVAL_MS) return;
+            } catch (NumberFormatException ignored) {
+                // 脏数据：直接覆盖
+            }
+        }
+        section.put("ts", now);
         playersConfig.set("players", players);
         playersConfig.save();
     }
@@ -745,5 +852,15 @@ public class PlayerStore {
             count.merge(String.valueOf(n).toLowerCase(), 1, Integer::sum);
         }
         return count;
+    }
+
+    private static boolean isFreshRaw(Map<Object, Object> section, long ttlMs) {
+        Object ts = section.get("ts");
+        if (ts == null) return false;
+        try {
+            return System.currentTimeMillis() - Long.parseLong(String.valueOf(ts)) <= ttlMs;
+        } catch (NumberFormatException e) {
+            return false;
+        }
     }
 }

@@ -35,8 +35,24 @@ Alias+ 目前检测：
 
 每个维度都可以在 `config.yml` 的 `checks` 下单独开关。另外还有两项校验开关：
 
-- `DeviceIdFormat` —— 拒绝格式非法的 `DeviceId`：不入库，并执行惩罚
+- `DeviceIdFormat` —— 拒绝格式非法、或与上报平台不吻合的 `DeviceId`（安卓/iOS 的大小写 hex、Windows 的 hex 或 UUID、Xbox 的 base64、PlayStation 的 UUID；没有观察数据的平台一律放行）。被拒绝的值不入库，并执行惩罚
 - `ResourcePackSpoof` —— 客户端声称已持有刚分配给它的包时，断开并惩罚；仅在 `ResourcePackCache` 开启时生效
+
+### 指纹时效
+
+`expire.ResourcePackCache` 与 `expire.BlobCache` 控制一条指纹在检测列表里保留多久（单位：天，默认 7）。
+超过有效期的指纹在构建检测列表时会被跳过。设为 `0` 表示不判过期。
+每次进服都会刷新该玩家已持有指纹的时间戳。
+
+### 缓存补全
+
+玩家完成首次检测（`confirmed`）之后，每次登录还会额外下发他自己的指纹包：
+客户端仍持有就跳过下载，缓存被清过就重新下载。
+
+### 指纹包外观
+
+`pack-name` 控制客户端资源包列表里显示的名称（默认 `Test`）。
+在插件目录放一个 `icon.png` 就会作为包图标，没有则不带图标。
 
 **使用：**
 

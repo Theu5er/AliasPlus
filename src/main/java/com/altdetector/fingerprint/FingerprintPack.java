@@ -1,4 +1,4 @@
-package com.altdetector.pack;
+package com.altdetector.fingerprint;
 
 import cn.nukkit.resourcepacks.ResourcePack;
 
@@ -15,20 +15,22 @@ import java.util.zip.ZipOutputStream;
  */
 public class FingerprintPack implements ResourcePack {
     private final UUID packId;
+    private final String packName;
     private final String packVersion;
     private final int packIndex;
     private final byte[] packData;
     private final byte[] sha256;
 
-    public FingerprintPack(UUID packId, int packIndex) {
+    public FingerprintPack(UUID packId, int packIndex, String packName, byte[] iconData) {
         this.packId = packId;
         this.packIndex = packIndex;
+        this.packName = (packName == null || packName.isEmpty()) ? "Test" : packName;
         this.packVersion = "1.0.0";
-        this.packData = generatePackData(packId);
+        this.packData = generatePackData(packId, this.packName, iconData);
         this.sha256 = computeSha256(this.packData);
     }
 
-    private static byte[] generatePackData(UUID packId) {
+    private static byte[] generatePackData(UUID packId, String packName, byte[] iconData) {
         String moduleUuid = new UUID(
                 packId.getMostSignificantBits() ^ 0xDEAD,
                 packId.getLeastSignificantBits() ^ 0xBEEF
@@ -36,8 +38,8 @@ public class FingerprintPack implements ResourcePack {
         String manifest = "{"
                 + "\"format_version\":2,"
                 + "\"header\":{"
-                + "\"name\":\"Test\","
-                + "\"description\":\"Test\","
+                + "\"name\":\"" + escapeJson(packName) + "\","
+                + "\"description\":\"" + escapeJson(packName) + "\","
                 + "\"uuid\":\"" + packId + "\","
                 + "\"version\":[1,0,0],"
                 + "\"min_engine_version\":[1,16,0]"
@@ -54,8 +56,18 @@ public class FingerprintPack implements ResourcePack {
             zos.putNextEntry(entry);
             zos.write(manifest.getBytes(StandardCharsets.UTF_8));
             zos.closeEntry();
+            if (iconData != null && iconData.length > 0) {
+                zos.putNextEntry(new ZipEntry("pack_icon.png"));
+                zos.write(iconData);
+                zos.closeEntry();
+            }
         } catch (Exception e) { throw new RuntimeException("Failed to build resource pack", e); }
         return baos.toByteArray();
+    }
+
+    /** manifest 是手拼的 JSON，名称里的引号和反斜杠要转义。 */
+    private static String escapeJson(String text) {
+        return text.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     private static byte[] computeSha256(byte[] data) {
@@ -63,7 +75,7 @@ public class FingerprintPack implements ResourcePack {
         catch (Exception e) { throw new RuntimeException("SHA-256 failed", e); }
     }
 
-    @Override public String getPackName() { return "Test"; }
+    @Override public String getPackName() { return packName; }
     @Override public UUID getPackId() { return packId; }
     @Override public String getPackVersion() { return packVersion; }
     @Override public int getPackSize() { return packData.length; }

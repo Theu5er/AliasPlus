@@ -7,13 +7,13 @@ import cn.nukkit.event.player.PlayerLoginEvent;
 import cn.nukkit.plugin.PluginBase;
 import cn.nukkit.utils.Config;
 import cn.nukkit.utils.LoginChainData;
-import com.altdetector.blob.BlobDetector;
+import com.altdetector.detection.BlobDetector;
 import com.altdetector.command.AliasCommand;
-import com.altdetector.identity.DeviceIdFormat;
+import com.altdetector.util.DeviceIdFormat;
 import com.altdetector.util.Hashes;
 import com.altdetector.util.Uuids;
-import com.altdetector.net.NetworkIdDetector;
-import com.altdetector.pack.PackDetector;
+import com.altdetector.detection.NetworkIdDetector;
+import com.altdetector.detection.PackDetector;
 import com.altdetector.punish.PunishManager;
 import com.altdetector.store.PlayerStore;
 import com.google.gson.JsonObject;
@@ -53,6 +53,10 @@ public class AltDetector extends PluginBase implements Listener {
     private PackDetector packDetector;
     private BlobDetector blobDetector;
     private PunishManager punishManager;
+    /** 客户端资源包列表里显示的名称；图标固定读插件目录下的 icon.png（可选）。 */
+    private String packName = "Test";
+    private byte[] packIcon;
+
     /* server.properties 的 force-resources；关掉时资源包不会被强制下载，检测无意义 */
     private boolean packAllowedByServer = true;
 
@@ -75,6 +79,17 @@ public class AltDetector extends PluginBase implements Listener {
         this.packAllowedByServer = this.getServer().getForceResources();
         if (!this.packAllowedByServer) {
             this.getLogger().warning("force-resources is off in server.properties; ResourcePackCache detection disabled");
+        }
+
+        String configuredName = this.config.getString("pack-name", "Test").trim();
+        if (!configuredName.isEmpty()) this.packName = configuredName;
+        File iconFile = new File(this.getDataFolder(), "icon.png");
+        if (iconFile.isFile()) {
+            try {
+                this.packIcon = java.nio.file.Files.readAllBytes(iconFile.toPath());
+            } catch (Exception e) {
+                this.getLogger().warning("Failed to read icon.png: " + e.getMessage());
+            }
         }
 
         if (!playersConfig.exists("players")) playersConfig.set("players", new LinkedHashMap<>());
@@ -139,6 +154,26 @@ public class AltDetector extends PluginBase implements Listener {
 
     public boolean deviceEnabled() {
         return this.config.getBoolean("checks.DeviceId", true);
+    }
+
+    /** 客户端资源包列表里显示的名称。 */
+    public String getPackName() {
+        return this.packName;
+    }
+
+    /** 资源包图标（插件目录下的 icon.png）；没有则为 null。 */
+    public byte[] getPackIcon() {
+        return this.packIcon;
+    }
+
+    /** 资源包指纹有效期（毫秒）；配置为 0 表示不判过期。 */
+    public long getPackExpireMs() {
+        return Math.max(0, this.config.getInt("expire.ResourcePackCache", 7)) * 86400000L;
+    }
+
+    /** Blob 指纹有效期（毫秒）；配置为 0 表示不判过期。 */
+    public long getBlobExpireMs() {
+        return Math.max(0, this.config.getInt("expire.BlobCache", 7)) * 86400000L;
     }
 
     public boolean deviceIdFormatEnabled() {
@@ -314,10 +349,15 @@ public class AltDetector extends PluginBase implements Listener {
             if (deviceEnabled()) {
                 String rawDevice = lcd.getDeviceId();
                 if (rawDevice != null && !rawDevice.isEmpty()) {
-                    if (deviceIdFormatEnabled() && !DeviceIdFormat.isValid(rawDevice)) {
-                        badDeviceId = true;
-                    } else {
+                    // 开关打开时：格式必须合法，且要和上报的平台吻合
+                    DeviceIdFormat.Format format = DeviceIdFormat.parse(rawDevice);
+                    boolean accept = !deviceIdFormatEnabled()
+                            || (format != DeviceIdFormat.Format.INVALID
+                                && DeviceIdFormat.matchesPlatform(format, lcd.getDeviceOS()));
+                    if (accept) {
                         identifiers.put("DeviceId", Hashes.sha256(rawDevice));
+                    } else {
+                        badDeviceId = true;
                     }
                 }
             }
@@ -335,5 +375,9 @@ public class AltDetector extends PluginBase implements Listener {
         String adopted = store.storeLogin(key, playerName, identifiers);
         if (adopted != null && this.blobDetector != null) this.blobDetector.reloadClaims();
         if (badDeviceId) this.punish(key);
+
+        // 进服即视为活跃：持有指纹的玩家刷新时效（内部按小时节流写盘）
+        store.touchPack(key);
+        store.touchBlob(key);
     }
 }

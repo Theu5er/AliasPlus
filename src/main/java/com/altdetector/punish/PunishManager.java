@@ -95,8 +95,14 @@ public class PunishManager {
     }
 
     private void execute(PendingPunish p) {
+        String safeName = safePlayerName(p.name);
+        if (safeName == null) {
+            plugin.getLogger().warning("Punish skipped for " + p.uuid
+                    + ": player name contains characters command parsers split on: " + p.name);
+            return;
+        }
         String cmd = plugin.getPunishCommand()
-                .replace("%player%", p.name)
+                .replace("%player%", safeName)
                 .replace("%uuid%", store.uuidOf(p.uuid));
         boolean ok;
         try {
@@ -130,4 +136,16 @@ public class PunishManager {
         }
     }
 
+
+    /** 只接受玩家名校验允许的字符；含空格等分词字符时返回 null（跳过本次惩罚，避免封错人）。 */
+    private static String safePlayerName(String name) {
+        if (name == null || name.isEmpty()) return null;
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            boolean ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9') || c == '_';
+            if (!ok) return null;
+        }
+        return name;
+    }
 }

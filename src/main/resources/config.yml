@@ -9,6 +9,14 @@ checks:
   ResourcePackSpoof: true
   BlobCache: true
 
+# Resource pack name shown in the client's pack list. The icon is read from icon.png in the plugin folder (optional).
+pack-name: "Test"
+
+# Fingerprint lifetime in days. 0 = never expire, keeping every fingerprint in rotation.
+expire:
+  ResourcePackCache: 7
+  BlobCache: 7
+
 strictmode: true
 # Strict mode
 #   true  = one-way: only show who cached/hit the target's fingerprints

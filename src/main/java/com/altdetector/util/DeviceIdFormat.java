@@ -1,4 +1,4 @@
-package com.altdetector.identity;
+package com.altdetector.util;
 
 import java.util.Base64;
 import java.util.Locale;
@@ -36,8 +36,31 @@ public final class DeviceIdFormat {
         return Format.INVALID;
     }
 
-    public static boolean isValid(String id) {
-        return parse(id) != Format.INVALID;
+
+    /**
+     * 该格式是否符合对应平台的惯例。deviceOS 取 Bedrock 的 DeviceOS 枚举值。
+     *
+     * <p>对应关系来自 gophertunnel 对真实客户端的观察（其注释标注），不是协议规定，
+     * 因此只对已知平台做判断，其余平台一律放行。
+     */
+    public static boolean matchesPlatform(Format format, int deviceOS) {
+        if (format == Format.INVALID) return false;
+        switch (deviceOS) {
+            case 1:   // Android
+            case 9:   // Dedicated
+                return format == Format.LOWER_HEX;
+            case 2:   // iOS
+                return format == Format.UPPER_HEX;
+            case 7:   // Windows 10
+            case 8:   // Windows 32
+                return format == Format.LOWER_HEX || format == Format.UUID;
+            case 11:  // Orbis (PlayStation)
+                return format == Format.UUID;
+            case 13:  // Xbox
+                return format == Format.BASE64;
+            default:
+                return true;
+        }
     }
 
     private static boolean isHex(String s) {

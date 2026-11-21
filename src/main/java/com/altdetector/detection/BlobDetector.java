@@ -1,4 +1,4 @@
-package com.altdetector.blob;
+package com.altdetector.detection;
 
 import cn.nukkit.Player;
 import cn.nukkit.event.EventHandler;
@@ -128,6 +128,7 @@ public class BlobDetector implements Listener {
             if (blob == null) continue;
             Object idObj = blob.get("id");
             if (idObj != null && !String.valueOf(idObj).isEmpty() && !"null".equalsIgnoreCase(String.valueOf(idObj))) {
+                if (!this.store.isBlobFresh(uuid, this.plugin.getBlobExpireMs())) continue;   // 过期的不参与检测
                 this.blobIds.put(uuid, String.valueOf(idObj));
             }
             Object cb = blob.get("claimed_by");

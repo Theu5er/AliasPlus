@@ -1,4 +1,4 @@
-package com.altdetector.pack;
+package com.altdetector.detection;
 
 import cn.nukkit.Player;
 import cn.nukkit.event.EventHandler;
@@ -12,7 +12,10 @@ import cn.nukkit.network.protocol.ResourcePacksInfoPacket;
 import cn.nukkit.resourcepacks.ResourcePack;
 import cn.nukkit.resourcepacks.ResourcePackManager;
 import com.altdetector.AltDetector;
+import com.altdetector.fingerprint.FingerprintPack;
+import com.altdetector.fingerprint.PackDownloadShim;
 import com.altdetector.store.PlayerStore;
+import com.altdetector.util.Uuids;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -55,8 +58,16 @@ public class PackDetector implements Listener {
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
-        sentPacks.remove(event.getPlayer().getUniqueId());
-        downloadShim.forget(event.getPlayer());
+        Player player = event.getPlayer();
+        sentPacks.remove(player.getUniqueId());
+        downloadShim.forget(player);
+
+        // 首次检测没走完（客户端没回 COMPLETED）就断开：撤掉这次分配，
+        // 避免留下一个从未被确认过的包继续下发给其他人
+        String identityKey = Uuids.keyOf(player);
+        if (!store.isPackConfirmed(identityKey)) {
+            store.removeUnconfirmedPack(identityKey);
+        }
     }
 
     /* ================================================================== */
@@ -76,12 +87,15 @@ public class PackDetector implements Listener {
         UUID playerUuid = player.getUniqueId();
         String playerUuidStr = playerUuid.toString();
 
-        Map<String, String> assignedPacks = store.getAssignedPacks();
+        Map<String, String> assignedPacks = store.getActivePacks(plugin.getPackExpireMs());
         String playerPack = assignedPacks.get(playerUuidStr);
 
         if (playerPack != null && !playerPack.isEmpty() && store.isPackConfirmed(playerUuidStr)) {
-            // 已经完成过初始化：只下发服务器自己的资源包
-            keepServerPacks(pk, null);
+            // 已经完成过初始化：服务器资源包 + 他自己的指纹包一起下发。
+            // 客户端有就跳过下载，没有（清过缓存/换设备）就重新下载，借此把缓存补回来。
+            FingerprintPack ownPack = getOrCreatePack(playerPack);
+            downloadShim.remember(player, ownPack);
+            keepServerPacks(pk, ownPack);
             return;
         }
 
@@ -181,6 +195,8 @@ public class PackDetector implements Listener {
 
         if (status == ResourcePackClientResponsePacket.STATUS_HAVE_ALL_PACKS) {
             sentPacks.remove(playerUuid);
+            // 只在首次检测时判定谎报：完成初始化之后的客户端本来就可能持有自己的包
+            if (store.isPackConfirmed(playerUuidStr)) return;
             if (!plugin.resourcePackSpoofEnabled()) return; // 检测关闭：交给 Nukkit 放行
             // 客户端声称持有刚分配给他的包，只可能是谎报：先触发惩罚，再断开
             plugin.punish(playerUuidStr);
@@ -194,7 +210,7 @@ public class PackDetector implements Listener {
             cachedUuids.removeAll(packEntries);
 
             if (!cachedUuids.isEmpty()) {
-                Map<String, String> assignedPacks = store.getAssignedPacks();
+                Map<String, String> assignedPacks = store.getActivePacks(plugin.getPackExpireMs());
                 for (String cachedUuid : cachedUuids) {
                     String ownerUuid = findOwnerByPackUuid(cachedUuid, assignedPacks);
                     if (ownerUuid != null && !ownerUuid.equals(playerUuidStr))
@@ -259,7 +275,8 @@ public class PackDetector implements Listener {
         FingerprintPack existing = packCache.get(packUuid);
         if (existing != null) return existing;
         int stableIndex = Math.abs(packUuid.hashCode());
-        FingerprintPack pack = new FingerprintPack(UUID.fromString(packUuid), stableIndex);
+        FingerprintPack pack = new FingerprintPack(UUID.fromString(packUuid), stableIndex,
+                plugin.getPackName(), plugin.getPackIcon());
         packCache.put(packUuid, pack);
         downloadShim.markFingerprint(pack.getPackId());
         registerPackWithManager(pack);
