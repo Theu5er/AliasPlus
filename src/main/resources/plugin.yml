@@ -1,6 +1,6 @@
 name: Alias+
 main: com.altdetector.AltDetector
-version: "1.1.1"
+version: "1.1.2"
 api: ["1.0.0"]
 author: u5er
 load: POSTWORLD
@@ -8,4 +8,7 @@ description: Advanced Alt Detection Plugin
 permissions:
   altdetector.alias:
     description: Query a player's linked alt accounts via /alias
+    default: op
+  altdetector.admin:
+    description: Access /alias -stats and /alias -reload
     default: op

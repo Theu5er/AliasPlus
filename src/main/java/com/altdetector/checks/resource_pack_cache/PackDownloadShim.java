@@ -1,4 +1,4 @@
-package com.altdetector.fingerprint;
+package com.altdetector.checks.resource_pack_cache;
 
 import cn.nukkit.Player;
 import cn.nukkit.event.EventHandler;
@@ -68,11 +68,12 @@ public class PackDownloadShim implements Listener {
         if (packet instanceof ResourcePackDataInfoPacket) {
             ResourcePackDataInfoPacket info = (ResourcePackDataInfoPacket) packet;
             if (!fingerprintIds.contains(info.packId)) return;   // 服务器自己的资源包原样下发
-            maxChunks.put(info.packId, info.maxChunkSize);
             byte[] hash = ownHash.get(id);
             if (hash != null) info.sha256 = hash;
             info.compressedPackSize = data.length;
             int maxChunk = info.maxChunkSize > 0 ? info.maxChunkSize : data.length;
+            // 存兜底后的值：下面切分片时若拿到 0，会切出空包让客户端一直重试
+            maxChunks.put(info.packId, maxChunk);
             info.chunkCount = Math.max(1, (int) Math.ceil(data.length / (double) maxChunk));
         } else if (packet instanceof ResourcePackChunkDataPacket) {
             ResourcePackChunkDataPacket chunk = (ResourcePackChunkDataPacket) packet;
@@ -81,6 +82,7 @@ public class PackDownloadShim implements Listener {
             if (offset < 0 || offset >= data.length) return;
             // 分片长度必须按我们自己声明的 size 算，不能沿用原包的分片长度
             int max = maxChunks.getOrDefault(chunk.packId, data.length);
+            if (max <= 0) max = data.length;
             int len = Math.min(max, data.length - offset);
             byte[] out = new byte[len];
             System.arraycopy(data, offset, out, 0, len);

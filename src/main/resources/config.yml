@@ -1,6 +1,10 @@
+# 玩家数据库文件名，位于插件目录下；扩展名由 H2 自行添加
+storage:
+  file: "aliasdb"
+
 checks:
   DeviceId: true
-  DeviceIdFormat: true
+  IdFormat: true
   SelfSignedId: true
   ClientRandomId: true
   NetworkID: true       # Only for clients that support NetherNet and when NetherNet is enabled
@@ -26,6 +30,10 @@ strictmode: true
 # In practice this is harmless: association is one-way unless strictmode is off,
 # and a spoofed hit only ends up banning the spoofer, or a player already banned.
 
+
+# Debug logging. Only enable when troubleshooting.
+debug:
+  blobcache: false
 punish:
   # %player% = player name, %uuid% = player uuid
-  command: "ban %player% Alt account detected"
+  command: "ban %player% test"

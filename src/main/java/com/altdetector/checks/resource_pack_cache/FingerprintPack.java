@@ -1,4 +1,4 @@
-package com.altdetector.fingerprint;
+package com.altdetector.checks.resource_pack_cache;
 
 import cn.nukkit.resourcepacks.ResourcePack;
 

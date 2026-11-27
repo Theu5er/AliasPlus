@@ -1,15 +1,16 @@
-package com.altdetector.util;
+package com.altdetector.checks;
 
 import java.util.Base64;
 import java.util.Locale;
 
 /**
- * DeviceId 格式判定，规则参照 gophertunnel 的 {@code DeviceID.Format()}。
+ * 身份标识格式判定，规则照搬 gophertunnel：
+ * {@code DeviceID.Format()}（DeviceId 格式）与 {@code ClientData.Validate()}（SelfSignedId / ClientRandomId）。
  *
- * <p>合法形态只有四种：32 位十六进制（分大小写）、标准 UUID、Base64（解码后 32 字节）。
+ * <p>DeviceId 合法形态只有四种：32 位十六进制（分大小写）、标准 UUID、Base64（解码后 32 字节）。
  * 判定顺序必须先 hex 后 UUID —— 32 位十六进制补上连字符也能被 UUID 解析器接受。
  */
-public final class DeviceIdFormat {
+public final class IdFormat {
 
     public enum Format {
         UPPER_HEX,
@@ -19,7 +20,7 @@ public final class DeviceIdFormat {
         INVALID
     }
 
-    private DeviceIdFormat() {
+    private IdFormat() {
     }
 
     public static Format parse(String id) {
@@ -35,7 +36,6 @@ public final class DeviceIdFormat {
         }
         return Format.INVALID;
     }
-
 
     /**
      * 该格式是否符合对应平台的惯例。deviceOS 取 Bedrock 的 DeviceOS 枚举值。
@@ -61,6 +61,26 @@ public final class DeviceIdFormat {
             default:
                 return true;
         }
+    }
+
+    /**
+     * 照搬 gophertunnel {@code ClientData.Validate()}：
+     * {@code if _, err := uuid.Parse(data.SelfSignedID); data.SelfSignedID != "" && err != nil} → 无效。
+     *
+     * <p>即：空字符串合法，非空必须能被解析为 UUID。{@code uuid.Parse} 接受带连字符的 36 位
+     * 和不带连字符的 32 位两种写法，这里与之保持一致。
+     */
+    public static boolean isValidSelfSignedId(String id) {
+        if (id == null || id.isEmpty()) return true;
+        return (id.length() == 36 && isUuid(id)) || (id.length() == 32 && isHex(id));
+    }
+
+    /**
+     * 照搬 gophertunnel {@code dial.go}：{@code if d.ClientRandomID == 0} 视为未设置。
+     * 该字段是客户端生成的随机 int64，取 0 说明没有提供真实值。
+     */
+    public static boolean isValidClientRandomId(long id) {
+        return id != 0;
     }
 
     private static boolean isHex(String s) {

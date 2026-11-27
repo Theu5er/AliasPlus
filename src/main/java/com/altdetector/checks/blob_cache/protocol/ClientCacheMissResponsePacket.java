@@ -1,4 +1,4 @@
-package com.altdetector.protocol;
+package com.altdetector.checks.blob_cache.protocol;
 
 import cn.nukkit.network.protocol.DataPacket;
 import cn.nukkit.network.protocol.ProtocolInfo;

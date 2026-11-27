@@ -7,16 +7,17 @@ import cn.nukkit.event.player.PlayerLoginEvent;
 import cn.nukkit.plugin.PluginBase;
 import cn.nukkit.utils.Config;
 import cn.nukkit.utils.LoginChainData;
-import com.altdetector.detection.BlobDetector;
+import com.altdetector.checks.blob_cache.BlobDetector;
+import com.altdetector.checks.ClientRandomId;
+import com.altdetector.checks.DeviceId;
+import com.altdetector.checks.SelfSignedId;
 import com.altdetector.command.AliasCommand;
-import com.altdetector.util.DeviceIdFormat;
-import com.altdetector.util.Hashes;
+import com.altdetector.checks.IdFormat;
 import com.altdetector.util.Uuids;
-import com.altdetector.detection.NetworkIdDetector;
-import com.altdetector.detection.PackDetector;
+import com.altdetector.checks.NetworkIdDetector;
+import com.altdetector.checks.resource_pack_cache.PackDetector;
 import com.altdetector.punish.PunishManager;
 import com.altdetector.store.PlayerStore;
-import com.google.gson.JsonObject;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -40,7 +41,7 @@ import java.util.Set;
  *       为每个账号生成唯一 biome 指纹 blob，同设备换号登录时命中即关联（{@link BlobDetector}）</li>
  * </ol>
  *
- * <p>所有数据统一存储在 {@code players.yml}（{@link PlayerStore}），
+ * <p>所有数据统一存储在插件目录下的 H2 数据库（{@link PlayerStore}），
  * {@code /alias <玩家名>} 一键查询全部维度（{@link AliasCommand}）。
  *
  * <p>本类只负责装配：配置初始化、模块构造、监听器与命令注册、登录事件入库。
@@ -72,7 +73,6 @@ public class AltDetector extends PluginBase implements Listener {
             this.saveResource("chs".equalsIgnoreCase(lang) ? "config.zh.yml" : "config.yml", "config.yml", false);
         }
         this.config = new Config(cfgFile, Config.YAML);
-        Config playersConfig = new Config(new File(this.getDataFolder(), "players.yml"), Config.YAML);
 
         if (!this.config.exists("checks")) migrateLegacyKeys();
 
@@ -92,13 +92,10 @@ public class AltDetector extends PluginBase implements Listener {
             }
         }
 
-        if (!playersConfig.exists("players")) playersConfig.set("players", new LinkedHashMap<>());
-        playersConfig.save();
-
-        this.store = new PlayerStore(playersConfig);
-        this.store.migrateLegacyStorage();
-        this.store.normalizePlayers();
-        this.store.purgeSpoofFlags();
+        // 玩家数据存 H2 内嵌库，文件放在插件目录下
+        String databaseName = this.config.getString("storage.file", "aliasdb").trim();
+        if (databaseName.isEmpty()) databaseName = "aliasdb";
+        this.store = new PlayerStore(new File(this.getDataFolder(), databaseName));
 
         this.blobDetector = new BlobDetector(this, store);
         this.blobDetector.loadData();
@@ -123,7 +120,7 @@ public class AltDetector extends PluginBase implements Listener {
     /* 老版本平铺配置 → 新结构：只写内存不落盘，避免覆盖带注释的模板 */
     private void migrateLegacyKeys() {
         config.set("checks.DeviceId", true);
-        config.set("checks.DeviceIdFormat", true);
+        config.set("checks.IdFormat", true);
         config.set("checks.SelfSignedId", true);
         config.set("checks.ClientRandomId", true);
         config.set("checks.NetworkID", config.getBoolean("networkid-enabled", true));
@@ -138,6 +135,45 @@ public class AltDetector extends PluginBase implements Listener {
     public void onDisable() {
         // 服务器即将关闭：同步执行所有仍在队列中的惩罚，不丢失
         if (this.punishManager != null) this.punishManager.flushAll();
+        if (this.store != null) this.store.close();
+    }
+
+    /* ================================================================== */
+    /*  配置重载                                                           */
+    /* ================================================================== */
+
+    /**
+     * 重载配置。开关、天数、惩罚命令这些每次使用都现读配置项，重载后立即生效；
+     * 包名和图标在生成包时就固化了，所以要把已生成的包清掉重做；
+     * Blob 的内存指纹表是按 expire 窗口载入的，改了天数必须重新加载才准。
+     *
+     * @return 是否成功读到配置文件
+     */
+    public boolean reloadConfiguration() {
+        try {
+            this.config.reload();
+        } catch (Exception e) {
+            this.getLogger().warning("Config reload failed: " + e.getMessage());
+            return false;
+        }
+
+        String configuredName = this.config.getString("pack-name", "Test").trim();
+        this.packName = configuredName.isEmpty() ? "Test" : configuredName;
+
+        // 图标可能被删掉，重载时先清空再读，避免还留着旧图标
+        this.packIcon = null;
+        File iconFile = new File(this.getDataFolder(), "icon.png");
+        if (iconFile.isFile()) {
+            try {
+                this.packIcon = java.nio.file.Files.readAllBytes(iconFile.toPath());
+            } catch (Exception e) {
+                this.getLogger().warning("Failed to read icon.png: " + e.getMessage());
+            }
+        }
+
+        if (this.packDetector != null) this.packDetector.clearPackCache();
+        if (this.blobDetector != null) this.blobDetector.loadData();
+        return true;
     }
 
     /* ================================================================== */
@@ -150,6 +186,11 @@ public class AltDetector extends PluginBase implements Listener {
 
     public boolean blobEnabled() {
         return this.config.getBoolean("checks.BlobCache", true);
+    }
+
+    /** BlobCache 排查日志开关，debug.blobcache=true 时输出带 [blob-debug] 前缀的详细链路。 */
+    public boolean blobDebugEnabled() {
+        return this.config.getBoolean("debug.blobcache", false);
     }
 
     public boolean deviceEnabled() {
@@ -176,8 +217,8 @@ public class AltDetector extends PluginBase implements Listener {
         return Math.max(0, this.config.getInt("expire.BlobCache", 7)) * 86400000L;
     }
 
-    public boolean deviceIdFormatEnabled() {
-        return this.config.getBoolean("checks.DeviceIdFormat", true);
+    public boolean idFormatEnabled() {
+        return this.config.getBoolean("checks.IdFormat", true);
     }
 
     public boolean resourcePackSpoofEnabled() {
@@ -322,6 +363,15 @@ public class AltDetector extends PluginBase implements Listener {
     }
 
     /**
+     * 同上，并记下触发来源，供 /alias stats 统计。
+     *
+     * @param source 取 {@link PunishManager} 的 SOURCE_* 常量
+     */
+    public int punish(String playerUuid, String source) {
+        return this.punishManager == null ? 0 : this.punishManager.punish(playerUuid, source);
+    }
+
+    /**
      * 开发者 API：该账号是否已被惩罚过（本插件执行过惩罚命令，或已在服务器封禁列表）。
      * 供"新账号命中已惩罚账号的指纹时自动惩罚"等扩展逻辑使用。
      */
@@ -344,37 +394,17 @@ public class AltDetector extends PluginBase implements Listener {
 
         // 档案 + 登录标识符一次落盘：原来要写 4 次盘，语义不变
         Map<String, String> identifiers = new LinkedHashMap<>();
-        boolean badDeviceId = false;
+        boolean badIdFormat = false;
         if (lcd != null) {
-            if (deviceEnabled()) {
-                String rawDevice = lcd.getDeviceId();
-                if (rawDevice != null && !rawDevice.isEmpty()) {
-                    // 开关打开时：格式必须合法，且要和上报的平台吻合
-                    DeviceIdFormat.Format format = DeviceIdFormat.parse(rawDevice);
-                    boolean accept = !deviceIdFormatEnabled()
-                            || (format != DeviceIdFormat.Format.INVALID
-                                && DeviceIdFormat.matchesPlatform(format, lcd.getDeviceOS()));
-                    if (accept) {
-                        identifiers.put("DeviceId", Hashes.sha256(rawDevice));
-                    } else {
-                        badDeviceId = true;
-                    }
-                }
-            }
-            if (clientRandomEnabled()) identifiers.put("ClientRandomId", Hashes.sha256(String.valueOf(lcd.getClientId())));
-            if (selfSignedEnabled()) {
-                try {
-                    JsonObject rawData = lcd.getRawData();
-                    if (rawData != null && rawData.has("SelfSignedId") && !rawData.get("SelfSignedId").isJsonNull())
-                        identifiers.put("SelfSignedId", Hashes.sha256(rawData.get("SelfSignedId").getAsString()));
-                } catch (Exception ignored) {}
-            }
+            if (DeviceId.collect(this, lcd, identifiers)) badIdFormat = true;
+            if (ClientRandomId.collect(this, lcd, identifiers)) badIdFormat = true;
+            if (SelfSignedId.collect(this, lcd, identifiers)) badIdFormat = true;
         }
 
         // 老键档案已并入 → 引用被重写，claim 内存副本要重载
         String adopted = store.storeLogin(key, playerName, identifiers);
         if (adopted != null && this.blobDetector != null) this.blobDetector.reloadClaims();
-        if (badDeviceId) this.punish(key);
+        if (badIdFormat) this.punish(key, PunishManager.SOURCE_ID_FORMAT);
 
         // 进服即视为活跃：持有指纹的玩家刷新时效（内部按小时节流写盘）
         store.touchPack(key);

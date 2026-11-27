@@ -1,4 +1,4 @@
-package com.altdetector.detection;
+package com.altdetector.checks;
 
 import cn.nukkit.Player;
 import cn.nukkit.event.EventHandler;
@@ -40,8 +40,11 @@ import org.cloudburstmc.netty.util.nethernet.PlayerInfo;
  */
 public class NetworkIdDetector implements Listener {
 
-    /** players.yml 中 ids 下的维度键，与 /alias 展示标签对应。 */
+    /** 存储层 identifiers 表的 kind，与 /alias 展示标签对应。 */
     public static final String DIMENSION = "NetworkID";
+
+    /** 客户端自报值，与 identifiers.id_value 列宽一致；超出的按"没有这个维度"处理。 */
+    private static final int MAX_LENGTH = 128;
 
     private final AltDetector plugin;
     private final PlayerStore store;
@@ -62,7 +65,16 @@ public class NetworkIdDetector implements Listener {
             // RakNet 连接或核心无 NetherNet 类：无值可存，不影响其他维度
             return;
         }
-        this.store.storeIdentifier(DIMENSION, networkId, Uuids.keyOf(player));
+        String sanitized = sanitize(networkId);
+        if (sanitized == null) {
+            return;
+        }
+        try {
+            this.store.storeIdentifier(DIMENSION, sanitized, Uuids.keyOf(player));
+        } catch (RuntimeException e) {
+            // 单个维度写失败不应该打断登录，其余维度照常记录
+            this.plugin.getLogger().warning("[NetworkID] store failed: " + e.getMessage());
+        }
     }
 
     /**
@@ -70,6 +82,20 @@ public class NetworkIdDetector implements Listener {
      *
      * @return NetworkID；RakNet 连接、信令未附带 PlayerInfo、或核心无 NetherNet 类时为 null
      */
+    /** 只接受可打印 ASCII，避免控制字符进库或污染日志；超长的直接丢弃。 */
+    private static String sanitize(String networkId) {
+        if (networkId == null || networkId.isEmpty() || networkId.length() > MAX_LENGTH) {
+            return null;
+        }
+        for (int index = 0; index < networkId.length(); index++) {
+            char c = networkId.charAt(index);
+            if (c < 0x21 || c > 0x7E) {
+                return null;
+            }
+        }
+        return networkId;
+    }
+
     private static String readNetworkId(Player player) {
         try {
             NetworkPlayerSession session = player.getNetworkSession();

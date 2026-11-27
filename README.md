@@ -2,29 +2,29 @@
 
 **English** | [中文](./README.zh.md)
 
-A Minecraft Bedrock Edition alt-account detection plugin built on the Nukkit-MOT core.
+Alternate account detection plugin for Minecraft Bedrock Edition, built on the Nukkit-MOT core.
 
 **Advantages:**
 
 🔍
-**Unique Detection**
-We have more detection methods than similar plugins, so the average spoofer is no longer unsolvable.
+**Distinctive detection**
+We cover more detection vectors than comparable plugins — common spoofers are no longer an unsolvable case.
 
 🎯
-**High Accuracy**
-Detection does not rely on non-unique evidence like IP; results can be used for bans directly.
+**High accuracy**
+Detection does not rely on non-unique evidence such as IP addresses, so results can be used for banning directly.
 
 🤫
-**Silent Detection**
-Detection is almost completely silent—cheaters have no idea why they got banned.
+**Silent detection**
+Detection is almost entirely silent — alternate account users never find out why they were banned.
 
 🔗
 **Developer API**
-We provide query and punishment APIs, allowing you to ban all alt accounts with one call.
+We provide lookup and punishment APIs, so all alternate accounts can be banned in one call.
 
-## Detection Vectors
+## Detection vectors
 
-Alias+ currently checks:
+Alias+ currently detects:
 
 - `DeviceId`
 - `ClientRandomId`
@@ -33,63 +33,59 @@ Alias+ currently checks:
 - `Resource Pack Cache`
 - `Blob Cache`
 
-Every vector can be turned on or off in `config.yml` under `checks`. Two extra guards live there as well:
+Every vector can be toggled individually under `checks` in `config.yml`. Two additional validation switches live there as well:
 
-- `DeviceIdFormat` — reject `DeviceId` values whose format is malformed **or** does not match the reported device OS (Android/iOS upper or lower hex, Windows hex or UUID, Xbox base64, PlayStation UUID; platforms without observation data are passed through). Rejected values are not stored and the account is punished
-- `ResourcePackSpoof` — disconnect and punish clients that claim to already hold the pack just assigned to them; only effective while `ResourcePackCache` is enabled
+- `IdFormat` — reject identifiers with a malformed format
+- `ResourcePackSpoof` — only effective while `ResourcePackCache` is enabled
 
-### Fingerprint lifetime
+### Fingerprint expiry
 
-`expire.ResourcePackCache` and `expire.BlobCache` control how long a fingerprint stays in rotation (in days, default 7).
-Expired fingerprints are skipped when the detection list is built. Setting a value to `0` disables expiry.
-Every login refreshes the timestamp of any fingerprint that player already holds.
-
-### Cache refill
-
-Once a player has completed the first check (`confirmed`), every later login also re-sends that player's own
-fingerprint pack. A client that still has it skips the download; a client that cleared its cache downloads it again.
-
-### Fingerprint pack appearance
-
-`pack-name` sets the name shown in the client's resource pack list (default `Test`).
-Put an `icon.png` next to `config.yml` in the plugin folder to use it as the pack icon; without it the pack has no icon.
+`expire.ResourcePackCache` and `expire.BlobCache` control how long a fingerprint stays in the detection list (in days, default 7).
+Fingerprints past their expiry are skipped when the detection list is built. Set to `0` to disable expiry.
+Each join refreshes the timestamps of the fingerprints the player already holds.
 
 **Usage:**
 
-Enable `force-resources` in the `server.properties` file — without it the resource pack vector is disabled at startup and a warning is logged.
-Enable `nethernet` in the `nukkit-mot.yml` file.
+Enable `force-resources` in `server.properties`, otherwise the resource pack vector is disabled automatically at startup with a warning.
+Enable `nethernet` in `nukkit-mot.yml`.
 
 ```
-/alias <name/uuid>
+/alias <name/uuid>      list every account related to that player
+/alias -stats           ban statistics grouped by detection vector
+/alias -reload          reload config.yml without restarting
 ```
+
+`-stats` and `-reload` require the `altdetector.admin` permission (op only by default).
 
 **Notes:**
 
-This project is a vibe-coding-assisted technical demo. It may contain bugs—do not use it on a production server.
+This project was built with AI assistance and is currently a beta release — bugs are possible.
 
 ## Developer API
 
-### Setup
+### Integration
 
-Add `depend: [Alias+]` to your plugin's `plugin.yml`, then get the instance:
+Add `depend: [Alias]` to your plugin's `plugin.yml`, then grab the instance.
+
+Note that the plugin id is `Alias`, not `Alias+`: Nukkit strips the plus sign when registering the plugin, so writing `Alias+` results in `Unknown dependency`. Also use `depend` rather than `softdepend` — the latter does not share classes, and the cast below throws `ClassCastException`.
 
 ```java
-AltDetector alias = (AltDetector) getServer().getPluginManager().getPlugin("Alias+");
+AltDetector alias = (AltDetector) getServer().getPluginManager().getPlugin("Alias");
 ```
 
-### Punish API
+### Punishment API
 
 ```java
 int count = alias.punish(uuid);
 ```
 
-- `uuid`: player uuid string (`player.getUniqueId().toString()`)
-- Returns: number of accounts added to the punishment queue (the target itself + all related alt accounts, deduplicated)
-- Punishment command is configured in `config.yml`: `punish.command` (placeholders `%player%`, `%uuid%`)
+- `uuid`: the player uuid string (`player.getUniqueId().toString()`)
+- Returns: the number of accounts queued for punishment (the target itself plus every related alternate, de-duplicated)
+- The punishment command is configured in `config.yml`: `punish.command` (placeholders `%player%`, `%uuid%`)
 
 ### Query API
 
 ```java
-Set<String> alts = alias.getRelatedAccounts(uuid);                  // all related alt uuids
-Map<String, Set<String>> byDim = alias.getRelatedByDimension(uuid); // by dimension (DeviceId/SelfSignedId/ClientRandomId/NetworkID/pack/blob)
+Set<String> alts = alias.getRelatedAccounts(uuid);                  // uuids of all related alternates
+Map<String, Set<String>> byDim = alias.getRelatedByDimension(uuid); // grouped by vector (DeviceId/SelfSignedId/ClientRandomId/NetworkID/pack/blob)
 ```

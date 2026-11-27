@@ -2,6 +2,9 @@ package com.altdetector.punish;
 
 import com.altdetector.AltDetector;
 import com.altdetector.store.PlayerStore;
+import com.altdetector.util.Uuids;
+import cn.nukkit.command.ConsoleCommandSender;
+import cn.nukkit.lang.TextContainer;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -26,6 +29,12 @@ import java.util.Set;
  */
 public class PunishManager {
 
+    /** 封禁来源：自动检测项 + 开发者手动调用。 */
+    public static final String SOURCE_ID_FORMAT = "IdFormat";
+    public static final String SOURCE_RESOURCE_PACK_SPOOF = "ResourcePackSpoof";
+    public static final String SOURCE_BLOB_CACHE = "BlobCache";
+    public static final String SOURCE_MANUAL = "Manual";
+
     private final AltDetector plugin;
     private final PlayerStore store;
 
@@ -33,14 +42,40 @@ public class PunishManager {
     private final List<PendingPunish> pending = new ArrayList<>();
     /** 已在队列中的账号，防止重复惩罚。 */
     private final Set<String> pendingUuids = new HashSet<>();
+    /** 静默执行者：惩罚命令照常执行，但不把命令的成功回显打到控制台。 */
+    private final SilentSender silentSender = new SilentSender();
+
+    /**
+     * 吞掉命令回显的 console 执行者。原版命令执行完会通过 sender.sendMessage 回显成功提示，
+     * 自动封禁一秒一个玩家会把控制台刷满，这里两个重载都丢弃。
+     *
+     * <p>拦不住命令或插件绕过 sender 直接写 logger 的情况。
+     */
+    private static final class SilentSender extends ConsoleCommandSender {
+        @Override
+        public void sendMessage(String message) {
+            // 故意丢弃
+        }
+
+        @Override
+        public void sendMessage(TextContainer message) {
+            // 故意丢弃
+        }
+    }
 
     private static final class PendingPunish {
         final String uuid;
         final String name;
+        /** 触发来源，统计用；仅在实际封禁成功后落库。 */
+        final String source;
+        /** 株连时指向被抓的那个人；直接封禁为 null。 */
+        final String trigger;
 
-        PendingPunish(String uuid, String name) {
+        PendingPunish(String uuid, String name, String source, String trigger) {
             this.uuid = uuid;
             this.name = name;
+            this.source = source;
+            this.trigger = trigger;
         }
     }
 
@@ -61,8 +96,23 @@ public class PunishManager {
      * @return 本次实际加入惩罚队列的账号数（已在队列中的账号不会重复加入）
      */
     public synchronized int punish(String playerUuid) {
+        return punish(playerUuid, SOURCE_MANUAL);
+    }
+
+    /**
+     * 同上，并带上这次封禁的来源维度。
+     *
+     * <p>来源只在封禁命令真正执行成功后才落库（见 {@link #execute}），
+     * 因此命令失败或该账号已在队列中而跳过时，不会产生统计记录。
+     * 一个账号只归到第一个封掉它的来源，所以统计各行相加等于被封账号数。
+     *
+     * @param source 触发来源，取本类 SOURCE_* 常量
+     */
+    public synchronized int punish(String playerUuid, String source) {
         if (playerUuid == null || playerUuid.isEmpty()) return 0;
-        String target = playerUuid.toLowerCase();
+        String target = Uuids.normalize(playerUuid);
+        if (target.isEmpty()) return 0;
+        String dim = source == null || source.isEmpty() ? SOURCE_MANUAL : source;
 
         LinkedHashSet<String> targets = new LinkedHashSet<>();
         targets.add(target);
@@ -70,8 +120,11 @@ public class PunishManager {
 
         int queued = 0;
         for (String uuid : targets) {
+            String name = store.displayName(uuid);
+            // 统计记录推迟到命令真正执行成功之后，避免"命令没成功却计入封禁数"
+            String trigger = uuid.equals(target) ? null : target;
             if (!pendingUuids.add(uuid)) continue;
-            pending.add(new PendingPunish(uuid, store.displayName(uuid)));
+            pending.add(new PendingPunish(uuid, name, dim, trigger));
             queued++;
         }
         return queued;
@@ -83,11 +136,16 @@ public class PunishManager {
         pending.clear();
         for (PendingPunish p : all) {
             pendingUuids.remove(p.uuid);
-            execute(p);
+            try {
+                execute(p);
+            } catch (RuntimeException e) {
+                // 关服兜底：一条失败不能连累后面还没执行的
+                plugin.getLogger().warning("Punish flush failed for " + p.uuid + ": " + e.getMessage());
+            }
         }
     }
 
-    private void tick() {
+    private synchronized void tick() {
         if (pending.isEmpty()) return;
         PendingPunish p = pending.remove(0);
         pendingUuids.remove(p.uuid);
@@ -106,7 +164,7 @@ public class PunishManager {
                 .replace("%uuid%", store.uuidOf(p.uuid));
         boolean ok;
         try {
-            ok = plugin.getServer().dispatchCommand(plugin.getServer().getConsoleSender(), cmd);
+            ok = plugin.getServer().getCommandMap().dispatch(silentSender, cmd);
         } catch (Exception e) {
             plugin.getLogger().warning("Punish command failed (" + p.uuid + "): " + e);
             return;
@@ -117,6 +175,12 @@ public class PunishManager {
         }
         // 命令真的执行了才打标记：之后该账号的指纹被新账号命中时，可自动惩罚新账号
         store.markPunished(p.uuid);
+        try {
+            store.recordBan(p.uuid, p.name, p.source, p.trigger);
+        } catch (RuntimeException e) {
+            // 统计写失败不能连累已经完成的封禁
+            plugin.getLogger().warning("Failed to record ban for " + p.uuid + ": " + e.getMessage());
+        }
     }
 
     /**
@@ -125,7 +189,7 @@ public class PunishManager {
      */
     public boolean isPunished(String playerUuid) {
         if (playerUuid == null || playerUuid.isEmpty()) return false;
-        String uuid = playerUuid.toLowerCase();
+        String uuid = Uuids.normalize(playerUuid);
         if (store.isPunishedFlagged(uuid)) return true;
         String name = store.displayName(uuid);
         if (name == null || name.isEmpty() || name.equals(uuid)) return false;

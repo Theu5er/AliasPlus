@@ -35,8 +35,8 @@ Alias+ 目前检测：
 
 每个维度都可以在 `config.yml` 的 `checks` 下单独开关。另外还有两项校验开关：
 
-- `DeviceIdFormat` —— 拒绝格式非法、或与上报平台不吻合的 `DeviceId`（安卓/iOS 的大小写 hex、Windows 的 hex 或 UUID、Xbox 的 base64、PlayStation 的 UUID；没有观察数据的平台一律放行）。被拒绝的值不入库，并执行惩罚
-- `ResourcePackSpoof` —— 客户端声称已持有刚分配给它的包时，断开并惩罚；仅在 `ResourcePackCache` 开启时生效
+- `IdFormat` —— 拒绝格式非法的标识符
+- `ResourcePackSpoof` —— 仅在 `ResourcePackCache` 开启时生效
 
 ### 指纹时效
 
@@ -44,37 +44,33 @@ Alias+ 目前检测：
 超过有效期的指纹在构建检测列表时会被跳过。设为 `0` 表示不判过期。
 每次进服都会刷新该玩家已持有指纹的时间戳。
 
-### 缓存补全
-
-玩家完成首次检测（`confirmed`）之后，每次登录还会额外下发他自己的指纹包：
-客户端仍持有就跳过下载，缓存被清过就重新下载。
-
-### 指纹包外观
-
-`pack-name` 控制客户端资源包列表里显示的名称（默认 `Test`）。
-在插件目录放一个 `icon.png` 就会作为包图标，没有则不带图标。
-
 **使用：**
 
 在 `server.properties` 文件中启用 `force-resources`，否则资源包维度会在启动时自动禁用并输出一条警告。
 在 `nukkit-mot.yml` 文件中启用 `nethernet`。
 
 ```
-/alias <名称/uuid>
+/alias <名称/uuid>      列出与该玩家关联的全部账号
+/alias -stats            按检测维度统计封禁情况
+/alias -reload           重载 config.yml，不用重启
 ```
+
+`-stats` 和 `-reload` 需要 `altdetector.admin` 权限（默认仅 op）。
 
 **注意事项：**
 
-本项目为 vibe coding 辅助完成的技术演示，可能存在 bug，请勿在成品服务器上使用。
+本项目由AI辅助完成，目前为测试版，可能存在bug。
 
 ## 开发者 API
 
 ### 接入
 
-在你的插件 `plugin.yml` 中加入 `depend: [Alias+]`，然后获取实例：
+在你的插件 `plugin.yml` 中加入 `depend: [Alias]`，然后获取实例。
+
+注意插件 id 是 `Alias` 而不是 `Alias+`：Nukkit 注册插件时会把加号去掉，写成 `Alias+` 会报 `Unknown dependency`。另外要用 `depend` 而不是 `softdepend`——后者不共享类，下面的强转会抛 `ClassCastException`。
 
 ```java
-AltDetector alias = (AltDetector) getServer().getPluginManager().getPlugin("Alias+");
+AltDetector alias = (AltDetector) getServer().getPluginManager().getPlugin("Alias");
 ```
 
 ### 惩罚 API

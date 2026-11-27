@@ -1,866 +1,806 @@
 package com.altdetector.store;
 
-import cn.nukkit.utils.Config;
 import com.altdetector.util.Uuids;
 
+import java.io.File;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.logging.Logger;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
- * players.yml 数据层：玩家档案、检测标识符、资源包/Blob 指纹关联的全部读写。
+ * 玩家数据存储：H2 内嵌数据库。
  *
- * <p>players 下的键是<b>身份键</b>：xbox-auth=off 用 UUID，开启用 XUID。
- * <pre>
- * name / aliases / uuid —— 身份（uuid 即存储键）
- * ids: {device, selfSigned, clientRandom, networkid} —— 登录标识符与 NetherNet NetworkID
- * pack: {uuid, confirmed, claimed_by} —— 资源包指纹、下载确认与命中者
- * blob: {id, claimed_by}       —— Blob 指纹与命中者
- * </pre>
- *
- * <p>写操作先 {@code reload()} 再 {@code save()}；只读操作返回副本，调用方改动不影响磁盘。
+ * <p>对外暴露的记录形态与旧版 YAML 完全一致（嵌套 Map），所以调用方无需改动；
+ * 内部按关系表存储，关联关系拆到独立表里，查询走索引。
  */
 public class PlayerStore {
 
-    private final Config playersConfig;
+    /** 8 个检测维度，顺序与 config.yml 的 checks 段一致。 */
+    private static final String[] BAN_DIMENSIONS =
+            {"DeviceId", "IdFormat", "SelfSignedId", "ClientRandomId", "NetworkID",
+                    "ResourcePackCache", "ResourcePackSpoof", "BlobCache"};
+    /** 存放在 identifiers 里、可在小号身上统计覆盖的四个身份维度。 */
+    private static final String[] ALT_IDENTIFIER_DIMENSIONS =
+            {"DeviceId", "SelfSignedId", "ClientRandomId", "NetworkID"};
+    /** 会主动封人的三个检测项。 */
+    private static final String[] ALT_BAN_SOURCES = {"IdFormat", "ResourcePackSpoof", "BlobCache"};
 
-    public PlayerStore(Config playersConfig) {
-        this.playersConfig = playersConfig;
+    /** 开发者手动调用封禁的来源标识。 */
+    private static final String SOURCE_MANUAL = "Manual";
+
+    /** 标识符列宽，与 SqlSchema 保持一致；超长值直接丢弃，不让一条脏数据拖垮整次登录写入。 */
+    private static final int IDENTIFIER_KIND_MAX_LENGTH = 32;
+    private static final int IDENTIFIER_VALUE_MAX_LENGTH = 128;
+
+    /** 允许拼接进 SQL 的表名，只接受这些字面量，杜绝把外部输入带进语句。 */
+    private static final Set<String> SINGLETON_TABLES = Set.of("packs", "blobs");
+    private static final Set<String> CLAIM_TABLES = Set.of("pack_claims", "blob_claims");
+
+    /** 按 uuid 直接归属玩家的表，老键改名时整行迁走。 */
+    private static final String[] LEGACY_OWNED_TABLES =
+            {"aliases", "identifiers", "packs", "blobs", "flags", "players"};
+
+    private static final long TOUCH_INTERVAL_MS = 3600_000L;
+
+    private final Connection connection;
+
+    public PlayerStore(File databaseFile) {
+        try {
+            // 插件 jar 可能没有 META-INF/services，SPI 自动注册会失效，这里显式加载
+            Class.forName("org.h2.Driver");
+            File parent = databaseFile.getParentFile();
+            if (parent != null) parent.mkdirs();
+            String url = "jdbc:h2:" + databaseFile.getAbsolutePath();
+            this.connection = DriverManager.getConnection(url, "sa", "");
+            SqlSchema.create(this.connection);
+        } catch (SQLException | ClassNotFoundException e) {
+            throw new IllegalStateException("Failed to open database: " + databaseFile, e);
+        }
     }
 
-    /** /alias 查询前刷新磁盘数据，避免读到内存中的过期副本。 */
-    public void reload() {
-        playersConfig.reload();
+    public synchronized void close() {
+        try {
+            // 必须用 SHUTDOWN：H2 的 Connection.close() 在 2.x 里不保证同步关掉 MVStore，
+            // 残留的文件锁会让 /reload 后重新打开报 OverlappingFileLockException
+            try (java.sql.Statement statement = this.connection.createStatement()) {
+                statement.execute("SHUTDOWN");
+            }
+            this.connection.close();
+        } catch (SQLException e) {
+            // 关服阶段没有补救手段，但必须留痕：否则下次启动只会表现为「数据库被锁」
+            Logger.getLogger("Alias").warning("Failed to close database cleanly: " + e.getMessage());
+        }
     }
 
     /* ================================================================== */
-    /*  基础结构                                                          */
+    /*  读取                                                              */
     /* ================================================================== */
 
-    @SuppressWarnings("unchecked")
-    public Map<String, Map<String, Object>> getPlayers() {
-        Object raw = playersConfig.get("players");
-        Map<String, Map<String, Object>> r = new LinkedHashMap<>();
-        if (raw instanceof Map) {
-            for (Map.Entry<Object, Object> e : ((Map<Object, Object>) raw).entrySet()) {
-                if (e.getValue() instanceof Map) {
-                    Map<String, Object> inner = new LinkedHashMap<>();
-                    for (Map.Entry<Object, Object> ie : ((Map<Object, Object>) e.getValue()).entrySet())
-                        inner.put(String.valueOf(ie.getKey()), ie.getValue());
-                    r.put(String.valueOf(e.getKey()), inner);
+    /** 全部玩家档案（嵌套 Map 形态，与旧版一致）。 */
+    public synchronized Map<String, Map<String, Object>> getPlayers() {
+        Map<String, Map<String, Object>> records = new LinkedHashMap<>();
+        try {
+            for (Map<String, Object> row : queryAll("SELECT uuid, name, created_at FROM players")) {
+                records.put(String.valueOf(row.get("uuid")), newRecord(String.valueOf(row.get("uuid")), row));
+            }
+            fillAliases(records, null);
+            fillIdentifiers(records, null);
+            fillPacks(records, null);
+            fillBlobs(records, null);
+            fillPunished(records, null);
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to load players", e);
+        }
+        return records;
+    }
+
+    /** 单条档案副本；不存在返回 null。 */
+    public synchronized Map<String, Object> getPlayer(String key) {
+        String uuid = Uuids.normalize(key);
+        try {
+            List<Map<String, Object>> rows = query("SELECT uuid, name, created_at FROM players WHERE uuid = ?", uuid);
+            if (rows.isEmpty()) return null;
+            Map<String, Map<String, Object>> records = new LinkedHashMap<>();
+            records.put(uuid, newRecord(uuid, rows.get(0)));
+            fillAliases(records, uuid);
+            fillIdentifiers(records, uuid);
+            fillPacks(records, uuid);
+            fillBlobs(records, uuid);
+            fillPunished(records, uuid);
+            return records.get(uuid);
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to load player: " + uuid, e);
+        }
+    }
+
+    /** 维度视图：kind -> (标识符 -> 玩家键集合)。 */
+    public synchronized Map<String, Map<String, List<String>>> getIdentifiers() {
+        Map<String, Map<String, List<String>>> grouped = new LinkedHashMap<>();
+        try {
+            for (Map<String, Object> row : queryAll("SELECT uuid, kind, id_value FROM identifiers")) {
+                String kind = String.valueOf(row.get("kind"));
+                String value = String.valueOf(row.get("id_value"));
+                String uuid = String.valueOf(row.get("uuid"));
+                grouped.computeIfAbsent(kind, ignored -> new LinkedHashMap<>())
+                        .computeIfAbsent(value, ignored -> new ArrayList<>())
+                        .add(uuid);
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to load identifiers", e);
+        }
+        return grouped;
+    }
+
+    /** 包指纹归属：owner -> [claimed_by]。 */
+    public synchronized Map<String, List<String>> getPackClaims() {
+        Map<String, List<String>> claims = new LinkedHashMap<>();
+        try {
+            for (Map<String, Object> row : queryAll("SELECT owner, claimer FROM pack_claims")) {
+                claims.computeIfAbsent(String.valueOf(row.get("owner")), ignored -> new ArrayList<>())
+                        .add(String.valueOf(row.get("claimer")));
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to load pack claims", e);
+        }
+        return claims;
+    }
+
+    /** 有效期内（ttlMs <= 0 表示不判过期）的包映射：owner -> pack uuid。 */
+    public synchronized Map<String, String> getActivePacks(long ttlMs) {
+        Map<String, String> active = new LinkedHashMap<>();
+        String sql = "SELECT uuid, pack_uuid FROM packs"
+                + (ttlMs > 0 ? " WHERE ts > 0 AND ts >= ?" : "");
+        try (PreparedStatement statement = this.connection.prepareStatement(sql)) {
+            if (ttlMs > 0) statement.setLong(1, System.currentTimeMillis() - ttlMs);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    active.put(resultSet.getString(1), resultSet.getString(2));
                 }
             }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to load active packs", e);
         }
-        return r;
+        return active;
     }
 
-    /** 单条记录副本；语义等同 getPlayers().get(key)，但不复制整张表。 */
-    @SuppressWarnings("unchecked")
-    public Map<String, Object> getPlayer(String key) {
-        Object raw = playersConfig.get("players");
-        if (!(raw instanceof Map)) return null;
-        Object v = ((Map<Object, Object>) raw).get(key);
-        if (!(v instanceof Map)) return null;
-        Map<String, Object> inner = new LinkedHashMap<>();
-        for (Map.Entry<Object, Object> ie : ((Map<Object, Object>) v).entrySet())
-            inner.put(String.valueOf(ie.getKey()), ie.getValue());
-        return inner;
+    /** 精确查该玩家的指纹包 uuid；不带时间过滤，查不到返回 null。 */
+    public synchronized String findPackUuid(String playerUuid) {
+        String key = Uuids.normalize(playerUuid);
+        if (key.isEmpty()) return null;
+        return readString("SELECT pack_uuid FROM packs WHERE uuid = ?", key);
     }
 
-    @SuppressWarnings("unchecked")
-    public static Map<String, Object> asMap(Object o) {
-        if (o instanceof Map) {
-            Map<String, Object> m = new LinkedHashMap<>();
-            for (Map.Entry<Object, Object> e : ((Map<Object, Object>) o).entrySet())
-                m.put(String.valueOf(e.getKey()), e.getValue());
-            return m;
+    public synchronized boolean isPackConfirmed(String playerUuid) {
+        return readFlag("SELECT confirmed FROM packs WHERE uuid = ?", Uuids.normalize(playerUuid));
+    }
+
+    public synchronized boolean isPunishedFlagged(String playerUuid) {
+        return readFlag("SELECT punished FROM flags WHERE uuid = ?", Uuids.normalize(playerUuid));
+    }
+    public synchronized String displayName(String key) {
+        Map<String, Object> record = getPlayer(key);
+        Object name = record == null ? null : record.get("name");
+        return name == null || String.valueOf(name).isEmpty() ? Uuids.normalize(key) : String.valueOf(name);
+    }
+
+    /** 展示用身份串：优先 xuid 之外的唯一标识，这里就是 uuid 本身。 */
+    public synchronized String getDisplayIdentifier(String key) {
+        return "uuid: " + Uuids.normalize(key);
+    }
+
+    public synchronized String uuidOf(String key) {
+        return Uuids.normalize(key);
+    }
+
+    /** 全服同名统计（忽略大小写）。 */
+    public synchronized Map<String, Integer> buildNameCollisionMap() {
+        Map<String, Integer> collisions = new LinkedHashMap<>();
+        try {
+            for (Map<String, Object> row : queryAll("SELECT name FROM players")) {
+                String name = String.valueOf(row.get("name")).toLowerCase();
+                if (name.isEmpty()) continue;
+                collisions.merge(name, 1, Integer::sum);
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to build name collision map", e);
+        }
+        return collisions;
+    }
+
+    /**
+     * 找到同名且尚未完成初始化的空壳记录所持有的包。
+     *
+     * <p>空壳 = 没有历史名字、也没有任何标识符，但有包分配。
+     */
+    public synchronized String findAdoptableShellPack(String playerName, String excludeUuid) {
+        if (playerName == null || playerName.isEmpty()) return null;
+        String excluded = Uuids.normalize(excludeUuid);
+        String sql = "SELECT p.uuid, p.pack_uuid FROM packs p"
+                + " JOIN players pl ON pl.uuid = p.uuid"
+                + " WHERE LOWER(pl.name) = ? AND p.uuid <> ?"
+                + " AND NOT EXISTS (SELECT 1 FROM aliases a WHERE a.uuid = p.uuid)"
+                + " AND NOT EXISTS (SELECT 1 FROM identifiers i WHERE i.uuid = p.uuid)";
+        try (PreparedStatement statement = this.connection.prepareStatement(sql)) {
+            statement.setString(1, playerName.toLowerCase());
+            statement.setString(2, excluded);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (resultSet.next()) return resultSet.getString(2);
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to find adoptable shell pack", e);
         }
         return null;
     }
 
-    /** 取/建嵌套 map 并写回 info（修正 asMap 副本未落盘的问题）。 */
-    public static Map<String, Object> resolveNested(Map<String, Object> info, String key) {
-        Map<String, Object> m = asMap(info.get(key));
-        if (m == null) m = new LinkedHashMap<>();
-        info.put(key, m);
-        return m;
-    }
-
-    public static Map<String, Object> newPlayerRecord() {
-        Map<String, Object> info = new LinkedHashMap<>();
-        info.put("name", "");
-        info.put("aliases", new ArrayList<>());
-        info.put("uuid", "");
-        info.put("Punished", false);
-        info.put("ids", new LinkedHashMap<>());
-        info.put("pack", new LinkedHashMap<>());
-        info.put("blob", new LinkedHashMap<>());
-        return info;
-    }
-
-    /** 以 UUID 新建记录。 */
-    public static Map<String, Object> newPlayerRecordFor(String playerUuid) {
-        Map<String, Object> info = newPlayerRecord();
-        String key = Uuids.normalize(playerUuid);
-        info.put("uuid", Uuids.isUuid(key) ? key : "");
-        return info;
-    }
-
     /* ================================================================== */
-    /*  启动迁移与结构规范化                                                */
+    /*  写入                                                              */
     /* ================================================================== */
-
-    /** 旧版扁平结构（identifiers/pack_claims/assigned_packs/blob_ids/blob_claims）静默合并进嵌套记录。 */
-    @SuppressWarnings("unchecked")
-    public void migrateLegacyStorage() {
-        Object playersRaw = playersConfig.get("players");
-        Object idsRaw = playersConfig.get("identifiers");
-        Object packClaimsRaw = playersConfig.get("pack_claims");
-        Object assignedRaw = playersConfig.get("assigned_packs");
-        Object blobIdsRaw = playersConfig.get("blob_ids");
-        Object blobClaimsRaw = playersConfig.get("blob_claims");
-
-        boolean hasLegacy = (idsRaw instanceof Map) || (packClaimsRaw instanceof Map)
-                || (assignedRaw instanceof Map) || (blobIdsRaw instanceof Map) || (blobClaimsRaw instanceof Map);
-        if (!hasLegacy) return;
-
-        Map<String, Map<String, Object>> players = new LinkedHashMap<>();
-        if (playersRaw instanceof Map) {
-            for (Map.Entry<Object, Object> e : ((Map<Object, Object>) playersRaw).entrySet()) {
-                if (e.getValue() instanceof Map) {
-                    Map<String, Object> inner = new LinkedHashMap<>();
-                    for (Map.Entry<Object, Object> ie : ((Map<Object, Object>) e.getValue()).entrySet())
-                        inner.put(String.valueOf(ie.getKey()), ie.getValue());
-                    players.put(String.valueOf(e.getKey()), inner);
-                }
-            }
-        }
-
-        if (idsRaw instanceof Map) {
-            for (Map.Entry<Object, Object> te : ((Map<Object, Object>) idsRaw).entrySet()) {
-                String type = String.valueOf(te.getKey());
-                if (!(te.getValue() instanceof Map)) continue;
-                for (Map.Entry<Object, Object> ie : ((Map<Object, Object>) te.getValue()).entrySet()) {
-                    List<String> uuids = new ArrayList<>();
-                    if (ie.getValue() instanceof List)
-                        for (Object o : (List<Object>) ie.getValue()) uuids.add(String.valueOf(o));
-                    else uuids.add(String.valueOf(ie.getValue()));
-                    for (String uuid : uuids) {
-                        Map<String, Object> info = players.computeIfAbsent(uuid, k -> newPlayerRecord());
-                        resolveNested(info, "ids").put(type, String.valueOf(ie.getKey()));
-                    }
-                }
-            }
-        }
-
-        if (assignedRaw instanceof Map) {
-            for (Map.Entry<Object, Object> e : ((Map<Object, Object>) assignedRaw).entrySet()) {
-                Map<String, Object> info = players.computeIfAbsent(String.valueOf(e.getKey()), k -> newPlayerRecord());
-                resolveNested(info, "pack").put("uuid", String.valueOf(e.getValue()));
-            }
-        }
-
-        if (packClaimsRaw instanceof Map) {
-            for (Map.Entry<Object, Object> e : ((Map<Object, Object>) packClaimsRaw).entrySet()) {
-                List<String> claimers = new ArrayList<>();
-                if (e.getValue() instanceof List)
-                    for (Object o : (List<Object>) e.getValue()) claimers.add(String.valueOf(o));
-                else claimers.add(String.valueOf(e.getValue()));
-                Map<String, Object> info = players.computeIfAbsent(String.valueOf(e.getKey()), k -> newPlayerRecord());
-                resolveNested(info, "pack").put("claimed_by", claimers);
-            }
-        }
-
-        if (blobIdsRaw instanceof Map) {
-            for (Map.Entry<Object, Object> e : ((Map<Object, Object>) blobIdsRaw).entrySet()) {
-                Map<String, Object> info = players.computeIfAbsent(String.valueOf(e.getKey()), k -> newPlayerRecord());
-                resolveNested(info, "blob").put("id", String.valueOf(e.getValue()));
-            }
-        }
-
-        if (blobClaimsRaw instanceof Map) {
-            for (Map.Entry<Object, Object> e : ((Map<Object, Object>) blobClaimsRaw).entrySet()) {
-                List<String> claimers = new ArrayList<>();
-                if (e.getValue() instanceof List)
-                    for (Object o : (List<Object>) e.getValue()) claimers.add(String.valueOf(o));
-                else claimers.add(String.valueOf(e.getValue()));
-                Map<String, Object> info = players.computeIfAbsent(String.valueOf(e.getKey()), k -> newPlayerRecord());
-                resolveNested(info, "blob").put("claimed_by", claimers);
-            }
-        }
-
-        playersConfig.set("players", players);
-        playersConfig.remove("identifiers");
-        playersConfig.remove("pack_claims");
-        playersConfig.remove("assigned_packs");
-        playersConfig.remove("blob_ids");
-        playersConfig.remove("blob_claims");
-        playersConfig.save();
-    }
-
-    @SuppressWarnings("unchecked")
-    public void normalizePlayers() {
-        Map<String, Map<String, Object>> players = getPlayers();
-        boolean changed = false;
-        for (Map.Entry<String, Map<String, Object>> entry : players.entrySet()) {
-            Map<String, Object> info = entry.getValue();
-            if (!info.containsKey("name")) { info.put("name", ""); changed = true; }
-            if (!info.containsKey("aliases")) { info.put("aliases", new ArrayList<>()); changed = true; }
-            if (!info.containsKey("uuid")) { info.put("uuid", ""); changed = true; }
-            if (!info.containsKey("Punished")) { info.put("Punished", false); changed = true; }
-            if (!info.containsKey("ids")) { info.put("ids", new LinkedHashMap<>()); changed = true; }
-            if (!info.containsKey("pack")) { info.put("pack", new LinkedHashMap<>()); changed = true; }
-            if (!info.containsKey("blob")) { info.put("blob", new LinkedHashMap<>()); changed = true; }
-            // 键本身是 UUID 时回填 uuid 字段
-            String key = Uuids.normalize(entry.getKey());
-            if (isEmptyValue(info.get("uuid")) && Uuids.isUuid(key)) {
-                info.put("uuid", key); changed = true;
-            }
-        }
-        if (changed) {
-            playersConfig.reload();
-            playersConfig.set("players", players);
-            playersConfig.save();
-        }
-    }
-
-    /* ================================================================== */
-    /*  维度视图（供检测器与命令查询）                                       */
-    /* ================================================================== */
-
-    @SuppressWarnings("unchecked")
-    public Map<String, Map<String, List<String>>> getIdentifiers() {
-        Map<String, Map<String, List<String>>> r = new LinkedHashMap<>();
-        for (Map.Entry<String, Map<String, Object>> pe : getPlayers().entrySet()) {
-            String uuid = pe.getKey();
-            Map<String, Object> ids = asMap(pe.getValue().get("ids"));
-            if (ids == null) continue;
-            for (Map.Entry<String, Object> ie : ids.entrySet()) {
-                String identifier = String.valueOf(ie.getValue());
-                if (identifier.isEmpty() || "null".equalsIgnoreCase(identifier)) continue;
-                r.computeIfAbsent(ie.getKey(), k -> new LinkedHashMap<>())
-                        .computeIfAbsent(identifier, k -> new ArrayList<>())
-                        .add(uuid);
-            }
-        }
-        return r;
-    }
-
-    public Map<String, List<String>> getPackClaims() {
-        Map<String, List<String>> r = new LinkedHashMap<>();
-        for (Map.Entry<String, Map<String, Object>> pe : getPlayers().entrySet()) {
-            Map<String, Object> pack = asMap(pe.getValue().get("pack"));
-            if (pack == null) continue;
-            Object cb = pack.get("claimed_by");
-            if (cb instanceof List) {
-                List<String> list = new ArrayList<>();
-                for (Object o : (List<Object>) cb) list.add(String.valueOf(o));
-                if (!list.isEmpty()) r.put(pe.getKey(), list);
-            }
-        }
-        return r;
-    }
-
-
-    /* ================================================================== */
-    /*  身份档案与标识符写入                                                */
-    /* ================================================================== */
-
-    /** 一次落盘写完整条登录：档案 + 登录时抓到的全部标识符。 */
-    public String storeLogin(String playerUuid, String playerName, Map<String, String> identifiers) {
-        playersConfig.reload();
-        Map<String, Map<String, Object>> players = getPlayers();
-        String key = Uuids.normalize(playerUuid);
-        ProfileWrite w = applyProfile(players, key, playerName);
-        if (!w.skipped) {
-            Map<String, Object> info = players.get(key);
-            for (Map.Entry<String, String> e : identifiers.entrySet()) {
-                String id = e.getValue();
-                if (id == null || id.isEmpty()) continue;
-                Map<String, Object> ids = resolveNested(info, "ids");
-                if (!id.equals(ids.get(e.getKey()))) { ids.put(e.getKey(), id); w.changed = true; }
-            }
-        }
-        if (w.changed) {
-            playersConfig.set("players", players);
-            playersConfig.save();
-        }
-        return w.adopted;
-    }
-
-    /** 档案写入的公共部分：只改内存副本，不落盘。 */
-    private ProfileWrite applyProfile(Map<String, Map<String, Object>> players, String key, String playerName) {
-        ProfileWrite w = new ProfileWrite();
-        if (key.isEmpty() || playerName == null) { w.skipped = true; return w; }
-        // 老版本可能把档案存在别的键下（例如 xuid），按 uuid 字段并回来
-        String adopted = adoptLegacyRecords(players, key);
-        boolean changed = adopted != null;
-
-        Map<String, Object> info = players.get(key);
-        if (info == null) {
-            info = newPlayerRecordFor(key);
-            info.put("name", playerName);
-            List<String> aliases = new ArrayList<>();
-            aliases.add(playerName);
-            info.put("aliases", aliases);
-            players.put(key, info);
-            changed = true;
-        } else {
-            if (!playerName.equals(info.get("name"))) { info.put("name", playerName); changed = true; }
-            Object aliasesObj = info.get("aliases");
-            List<String> aliases = new ArrayList<>();
-            if (aliasesObj instanceof List) for (Object o : (List<?>) aliasesObj) aliases.add(String.valueOf(o));
-            if (!aliases.contains(playerName)) { aliases.add(playerName); info.put("aliases", aliases); changed = true; }
-            if (!info.containsKey("Punished")) { info.put("Punished", false); changed = true; }
-        }
-
-        if (!key.equals(info.get("uuid"))) { info.put("uuid", key); changed = true; }
-
-        // 收养同名空壳记录：首次检测（可能发生在未认证连接上）留下的壳——pack 已分配给该
-        // 设备且客户端可能已缓存——搬到当前身份名下并删除壳，保证下次重连按身份键就能命中，
-        // 同时 players.yml 里不再残留 name 缺失的空玩家
-        if (adoptShellRecords(key, playerName, info, players)) changed = true;
-
-        w.adopted = adopted;
-        w.changed = changed;
-        return w;
-    }
-
-    /** applyProfile 的返回值。 */
-    private static final class ProfileWrite {
-        String adopted;
-        boolean changed;
-        boolean skipped;
-    }
-
-    /** 写入某个维度的标识符（playerUuid 参数实为身份键）。 */
-    public void storeIdentifier(String type, String identifier, String playerUuid) {
-        if (identifier == null || identifier.isEmpty()) return;
-        playersConfig.reload();
-        Map<String, Map<String, Object>> players = getPlayers();
-        Map<String, Object> info = players.get(playerUuid);
-        if (info == null) {
-            info = newPlayerRecordFor(playerUuid);
-            info.put("name", playerUuid);
-            players.put(playerUuid, info);
-        }
-        Map<String, Object> ids = resolveNested(info, "ids");
-        if (!identifier.equals(ids.get(type))) {
-            ids.put(type, identifier);
-            playersConfig.set("players", players);
-            playersConfig.save();
-        }
-    }
-
-    /** @return true = 本次新增的 claim（已存在则返回 false，不重复写盘） */
-    public boolean addPackClaim(String claimerUuid, String ownerUuid) {
-        if (ownerUuid == null) return false;
-        playersConfig.reload();
-        Map<String, Map<String, Object>> players = getPlayers();
-        Map<String, Object> info = players.get(ownerUuid);
-        if (info == null) return false;
-        Map<String, Object> pack = resolveNested(info, "pack");
-        List<String> list = new ArrayList<>();
-        Object cb = pack.get("claimed_by");
-        if (cb instanceof List) for (Object o : (List<Object>) cb) list.add(String.valueOf(o));
-        if (list.contains(claimerUuid)) return false;
-        list.add(claimerUuid);
-        pack.put("claimed_by", list);
-        playersConfig.set("players", players);
-        playersConfig.save();
-        return true;
-    }
-
-    /** 客户端是否真的把他自己的指纹包下载完了。 */
-    public boolean isPackConfirmed(String playerUuid) {
-        Map<String, Object> info = getPlayer(Uuids.normalize(playerUuid));
-        if (info == null) return false;
-        Map<String, Object> pack = resolveNested(info, "pack");
-        Object c = pack.get("confirmed");
-        if (c instanceof Boolean) return (Boolean) c;
-        return "true".equalsIgnoreCase(String.valueOf(c));
-    }
-
-    /** 客户端下载完指纹包后置位；之后登录不再重新走初始化。 */
-    public void markPackConfirmed(String playerUuid) {
-        String key = Uuids.normalize(playerUuid);
-        playersConfig.reload();
-        Map<String, Map<String, Object>> players = getPlayers();
-        Map<String, Object> info = players.get(key);
-        if (info == null) return;
-        Map<String, Object> pack = resolveNested(info, "pack");
-        Object c = pack.get("confirmed");
-        if (c instanceof Boolean && (Boolean) c) return;
-        pack.put("confirmed", true);
-        playersConfig.set("players", players);
-        playersConfig.save();
-    }
-
-    /* ================================================================== */
-    /*  指纹时效                                                          */
-    /* ================================================================== */
-
-    /** 同一条指纹的写盘间隔：一小时内重复刷新不重复落盘。 */
-    private static final long TOUCH_INTERVAL_MS = 3600_000L;
-
-
-    /** 资源包指纹是否仍在有效期内。ttlMs <= 0 表示不判过期；缺 ts 视为过期。 */
-    public boolean isPackFresh(String playerUuid, long ttlMs) {
-        if (ttlMs <= 0) return true;
-        Map<String, Object> info = getPlayer(Uuids.normalize(playerUuid));
-        return info != null && isFresh(asMap(info.get("pack")), ttlMs);
-    }
-
-    /** Blob 指纹是否仍在有效期内。 */
-    public boolean isBlobFresh(String playerUuid, long ttlMs) {
-        if (ttlMs <= 0) return true;
-        Map<String, Object> info = getPlayer(Uuids.normalize(playerUuid));
-        return info != null && isFresh(asMap(info.get("blob")), ttlMs);
-    }
-
-    /** 有效期内（或未启用时效）的资源包映射：owner uuid -> pack uuid。 */
-    @SuppressWarnings("unchecked")
-    public Map<String, String> getActivePacks(long ttlMs) {
-        Map<String, String> r = new LinkedHashMap<>();
-        Object raw = playersConfig.get("players");
-        if (!(raw instanceof Map)) return r;
-        // 只读不复制整表：逐条取 pack 段判断
-        for (Map.Entry<Object, Object> pe : ((Map<Object, Object>) raw).entrySet()) {
-            if (!(pe.getValue() instanceof Map)) continue;
-            Object packRaw = ((Map<Object, Object>) pe.getValue()).get("pack");
-            if (!(packRaw instanceof Map)) continue;
-            Map<Object, Object> pack = (Map<Object, Object>) packRaw;
-            Object pu = pack.get("uuid");
-            if (pu == null || String.valueOf(pu).isEmpty() || "null".equalsIgnoreCase(String.valueOf(pu))) continue;
-            if (ttlMs > 0 && !isFreshRaw(pack, ttlMs)) continue;
-            r.put(String.valueOf(pe.getKey()), String.valueOf(pu));
-        }
-        return r;
-    }
 
     /**
-     * 删除尚未确认的资源包分配（首次检测没走完就断开时调用）。
+     * 一次事务写入登录档案：档案、历史名字、标识符。
      *
-     * <p>只删 {@code pack} 段，玩家档案本身保留。下次登录会被当成新账号重新分配。
+     * @return 被并入当前键的老键（老版本遗留），无则 null
      */
-    public boolean removeUnconfirmedPack(String playerUuid) {
+    public synchronized String storeLogin(String playerUuid, String playerName, Map<String, String> identifiers) {
         String key = Uuids.normalize(playerUuid);
-        playersConfig.reload();
-        Map<String, Map<String, Object>> players = getPlayers();
-        Map<String, Object> info = players.get(key);
-        if (info == null || !(info.get("pack") instanceof Map)) return false;
-        info.remove("pack");
-        playersConfig.set("players", players);
-        playersConfig.save();
-        return true;
-    }
-
-    /** 进服时刷新资源包指纹的时效，写盘间隔见 {@link #TOUCH_INTERVAL_MS}。 */
-    public void touchPack(String playerUuid) {
-        touch(playerUuid, "pack");
-    }
-
-    /** 进服时刷新 Blob 指纹的时效。 */
-    public void touchBlob(String playerUuid) {
-        touch(playerUuid, "blob");
-    }
-
-    private boolean isFresh(Map<String, Object> section, long ttlMs) {
-        if (section == null) return false;
-        Object ts = section.get("ts");
-        if (ts == null) return false;
+        if (key.isEmpty() || playerName == null) return null;
+        String adopted = adoptLegacy(key);
         try {
-            return System.currentTimeMillis() - Long.parseLong(String.valueOf(ts)) <= ttlMs;
-        } catch (NumberFormatException e) {
-            return false;
-        }
-    }
-
-    private void touch(String playerUuid, String nested) {
-        String key = Uuids.normalize(playerUuid);
-        Map<String, Object> cached = getPlayer(key);
-        if (cached != null) {
-            Map<String, Object> section = asMap(cached.get(nested));
-            if (section == null || section.isEmpty()) return;   // 没有对应指纹，不创建空段
-            Object ts = section.get("ts");
-            if (ts != null) {
-                try {
-                    if (System.currentTimeMillis() - Long.parseLong(String.valueOf(ts)) < TOUCH_INTERVAL_MS) {
-                        return;                                     // 节流窗口内：不读盘、不复制
-                    }
-                } catch (NumberFormatException ignored) {
-                    // 脏数据：继续走覆盖流程
+            this.connection.setAutoCommit(false);
+            upsertPlayer(key, playerName);
+            insertAlias(key, playerName);
+            if (identifiers != null) {
+                for (Map.Entry<String, String> entry : identifiers.entrySet()) {
+                    upsertIdentifier(key, entry.getKey(), entry.getValue());
                 }
             }
-        }
-        playersConfig.reload();
-        Map<String, Map<String, Object>> players = getPlayers();
-        Map<String, Object> info = players.get(key);
-        if (info == null) return;
-        Map<String, Object> exist = asMap(info.get(nested));
-        if (exist == null || exist.isEmpty()) return;   // 没有对应指纹，不创建空段
-        Map<String, Object> section = resolveNested(info, nested);
-        long now = System.currentTimeMillis();
-        Object old = section.get("ts");
-        if (old != null) {
-            try {
-                if (now - Long.parseLong(String.valueOf(old)) < TOUCH_INTERVAL_MS) return;
-            } catch (NumberFormatException ignored) {
-                // 脏数据：直接覆盖
-            }
-        }
-        section.put("ts", now);
-        playersConfig.set("players", players);
-        playersConfig.save();
-    }
-
-    /* ================================================================== */
-    /*  旧字段清理（ResourcePackSpoof 已由直接断连取代）                    */
-    /* ================================================================== */
-
-    /** 删掉历史记录里的 ResourcePackSpoof 字段，返回是否改动过。 */
-    public boolean purgeSpoofFlags() {
-        Map<String, Map<String, Object>> players = getPlayers();
-        boolean changed = false;
-        for (Map<String, Object> info : players.values()) {
-            if (info.remove("ResourcePackSpoof") != null) changed = true;
-        }
-        if (changed) {
-            playersConfig.set("players", players);
-            playersConfig.save();
-        }
-        return changed;
-    }
-
-    /* ================================================================== */
-    /*  Punished 标记（该账号已被本插件惩罚过）                              */
-    /* ================================================================== */
-
-    public boolean isPunishedFlagged(String playerUuid) {
-        Map<String, Object> info = getPlayer(playerUuid);
-        if (info == null) return false;
-        Object flag = info.get("Punished");
-        if (flag instanceof Boolean) return (Boolean) flag;
-        return "true".equalsIgnoreCase(String.valueOf(flag));
-    }
-
-    public void markPunished(String playerUuid) {
-        Map<String, Map<String, Object>> players = getPlayers();
-        Map<String, Object> info = players.get(playerUuid);
-        if (info == null) {
-            info = newPlayerRecordFor(playerUuid);
-            info.put("name", playerUuid);
-            players.put(playerUuid, info);
-        }
-        Object current = info.get("Punished");
-        boolean already = current instanceof Boolean ? (Boolean) current
-                : "true".equalsIgnoreCase(String.valueOf(current));
-        if (already) return;
-        info.put("Punished", true);
-        players.put(playerUuid, info);
-        playersConfig.reload();
-        playersConfig.set("players", players);
-        playersConfig.save();
-    }
-
-    /* ================================================================== */
-    /*  老数据归并（老版本把档案存在 uuid 以外的键下）                        */
-    /* ================================================================== */
-
-    /** 登录时把 uuid 字段相同、却挂在别的键下的老档案并进当前键（含 claim 引用重写）；返回被并入的老键，无则 null。 */
-    private String adoptLegacyRecords(Map<String, Map<String, Object>> players, String key) {
-        List<String> stale = new ArrayList<>();
-        for (Map.Entry<String, Map<String, Object>> e : players.entrySet()) {
-            if (e.getKey().trim().equalsIgnoreCase(key)) continue;
-            Object u = e.getValue().get("uuid");
-            if (!(u instanceof String)) continue;
-            String s = ((String) u).trim();
-            if (s.isEmpty() || !s.equalsIgnoreCase(key)) continue;
-            stale.add(e.getKey());
-        }
-        String adopted = null;
-        for (String old : stale) {
-            Map<String, Object> oldInfo = players.remove(old);
-            if (oldInfo == null) continue;
-            Map<String, Object> current = players.get(key);
-            if (current == null) players.put(key, oldInfo);
-            else mergeRecord(current, oldInfo);
-            remapClaimReferences(players, old, key);
-            adopted = old;
+            this.connection.commit();
+        } catch (SQLException | RuntimeException e) {
+            rollbackQuietly();
+            throw new IllegalStateException("Failed to store login: " + key, e);
+        } finally {
+            restoreAutoCommit();
         }
         return adopted;
     }
 
-    /** 老记录并入新记录：只填缺失项，不覆盖已有值。 */
-    @SuppressWarnings("unchecked")
-    private void mergeRecord(Map<String, Object> target, Map<String, Object> source) {
-        if (target == null || source == null) return;
-        if (isEmptyValue(target.get("name")) && !isEmptyValue(source.get("name")))
-            target.put("name", source.get("name"));
-        Object sa = source.get("aliases");
-        if (sa instanceof List && !((List<?>) sa).isEmpty()) {
-            List<String> merged = new ArrayList<>();
-            Object ta = target.get("aliases");
-            if (ta instanceof List) for (Object o : (List<?>) ta) merged.add(String.valueOf(o));
-            for (Object o : (List<?>) sa) {
-                String name = String.valueOf(o);
-                if (!merged.contains(name)) merged.add(name);
-            }
-            target.put("aliases", merged);
-        }
-        if (isEmptyValue(target.get("uuid")) && !isEmptyValue(source.get("uuid")))
-            target.put("uuid", source.get("uuid"));
-        for (String nested : new String[]{"ids", "pack", "blob"}) {
-            Map<String, Object> src = asMap(source.get(nested));
-            if (src == null || src.isEmpty()) continue;
-            Map<String, Object> dst = resolveNested(target, nested);
-            for (Map.Entry<String, Object> e : src.entrySet()) {
-                if (isEmptyValue(dst.get(e.getKey()))) dst.put(e.getKey(), e.getValue());
-            }
-        }
-        // 宁严勿松：丢标记等于放过已确认的小号
-        if (asBoolean(source.get("Punished"))) target.put("Punished", true);
-    }
-
-    /** claim 引用重写：键改名后其他账号的命中列表仍写着老键，必须同步搬走。 */
-    @SuppressWarnings("unchecked")
-    private void remapClaimReferences(Map<String, Map<String, Object>> players, String oldKey, String newKey) {
-        for (Map<String, Object> info : players.values()) {
-            for (String nested : new String[]{"pack", "blob"}) {
-                Map<String, Object> m = asMap(info.get(nested));
-                if (m == null) continue;
-                Object cb = m.get("claimed_by");
-                if (!(cb instanceof List)) continue;
-                List<String> out = new ArrayList<>();
-                boolean changed = false;
-                for (Object o : (List<?>) cb) {
-                    String v = String.valueOf(o);
-                    String nv = v.equals(oldKey) ? newKey : v;
-                    if (!nv.equals(v)) changed = true;
-                    if (!out.contains(nv)) out.add(nv);
-                }
-                if (changed) resolveNested(info, nested).put("claimed_by", out);
-            }
-        }
-    }
-
-    /** 记录键（现在就是 UUID）；老版本按 xuid 存的历史记录取记录里的 uuid 字段。 */
-    public String uuidOf(String key) {
-        String k = Uuids.normalize(key);
-        Map<String, Object> info = getPlayer(k);
-        if (info != null) {
-            Object u = info.get("uuid");
-            String s = u == null ? "" : Uuids.normalize(String.valueOf(u));
-            if (Uuids.isUuid(s)) return s;
-        }
-        return k;
-    }
-
-    private static boolean asBoolean(Object v) {
-        if (v instanceof Boolean) return (Boolean) v;
-        return v != null && "true".equalsIgnoreCase(String.valueOf(v));
-    }
-
-    private static boolean isEmptyValue(Object v) {
-        if (v == null) return true;
-        if (v instanceof String) {
-            String s = ((String) v).trim();
-            return s.isEmpty() || "null".equalsIgnoreCase(s);
-        }
-        if (v instanceof List) return ((List<?>) v).isEmpty();
-        if (v instanceof Map) return ((Map<?, ?>) v).isEmpty();
-        return false;
-    }
-
-    /* ================================================================== */
-    /*  空壳记录收养（身份切换兜底，见 PackDetector）                        */
-    /* ================================================================== */
-
-    /**
-     * 空壳记录判定：从未走过 PlayerLoginEvent 的记录。
-     * aliases 为空即壳（登录成功时总会把玩家名写进 aliases）；
-     * 兼容存量数据：lastMs 存在且非 0 的老记录一定登录过，不是壳。
-     */
-    public boolean isShellRecord(Map<String, Object> info) {
-        if (info == null) return false;
-        Object lm = info.get("lastMs");
-        if (lm instanceof Number && ((Number) lm).longValue() != 0L) return false;
-        Object al = info.get("aliases");
-        if (al instanceof List && !((List<?>) al).isEmpty()) return false;
-        return true;
-    }
-
-    /** 按名字找空壳记录里已分配的指纹包（PackDetector 身份切换兜底用）。 */
-    public String findAdoptableShellPack(String playerName, String excludeUuid) {
-        if (playerName == null || playerName.isEmpty()) return null;
-        for (Map.Entry<String, Map<String, Object>> pe : getPlayers().entrySet()) {
-            if (pe.getKey().equalsIgnoreCase(excludeUuid)) continue;
-            Map<String, Object> info = pe.getValue();
-            if (!isShellRecord(info)) continue;
-            Object nm = info.get("name");
-            if (nm == null || String.valueOf(nm).trim().isEmpty()
-                    || !String.valueOf(nm).equalsIgnoreCase(playerName)) continue;
-            Map<String, Object> pack = asMap(info.get("pack"));
-            if (pack == null) continue;
-            Object pu = pack.get("uuid");
-            if (pu != null && !String.valueOf(pu).isEmpty() && !"null".equalsIgnoreCase(String.valueOf(pu)))
-                return String.valueOf(pu);
-        }
-        return null;
-    }
-
-    /**
-     * 把玩家名匹配到的所有空壳记录并进当前记录后删除壳（只搬当前记录缺失的键：
-     * pack.uuid/claimed_by/blob/ids）。只改传入的 players 副本，不自行落盘，由调用方统一保存。
-     *
-     * @return 是否收养了至少一条壳记录
-     */
-    public boolean adoptShellRecords(String playerUuid, String playerName, Map<String, Object> current,
-                                     Map<String, Map<String, Object>> players) {
-        if (playerName == null || playerName.isEmpty() || current == null || players == null) return false;
-        List<String> shells = new ArrayList<>();
-        for (Map.Entry<String, Map<String, Object>> pe : players.entrySet()) {
-            if (pe.getKey().equalsIgnoreCase(playerUuid)) continue;
-            Map<String, Object> info = pe.getValue();
-            if (!isShellRecord(info)) continue;
-            Object nm = info.get("name");
-            if (nm == null || String.valueOf(nm).trim().isEmpty()
-                    || !String.valueOf(nm).equalsIgnoreCase(playerName)) continue;
-            shells.add(pe.getKey());
-        }
-        if (shells.isEmpty()) return false;
-        for (String shellKey : shells) {
-            Map<String, Object> shell = players.get(shellKey);
-            if (shell == null) continue;
-            Map<String, Object> shellPack = resolveNested(shell, "pack");
-            Map<String, Object> curPack = resolveNested(current, "pack");
-            Object su = shellPack.get("uuid");
-            boolean suValid = su != null && !String.valueOf(su).isEmpty() && !"null".equalsIgnoreCase(String.valueOf(su));
-            Object cu = curPack.get("uuid");
-            boolean cuEmpty = cu == null || String.valueOf(cu).isEmpty() || "null".equalsIgnoreCase(String.valueOf(cu));
-            if (suValid && cuEmpty) curPack.put("uuid", String.valueOf(su));
-            Object scb = shellPack.get("claimed_by");
-            if (scb instanceof List && !((List<?>) scb).isEmpty() && curPack.get("claimed_by") == null)
-                curPack.put("claimed_by", scb);
-            mergeShellNested(shell, current, "blob");
-            mergeShellNested(shell, current, "ids");
-            players.remove(shellKey);
-        }
-        return true;
-    }
-
-    /** 空壳数据合并：from 的嵌套 map 中 to 缺失的键搬过去。 */
-    private void mergeShellNested(Map<String, Object> from, Map<String, Object> to, String key) {
-        Map<String, Object> src = asMap(from.get(key));
-        if (src == null || src.isEmpty()) return;
-        Map<String, Object> dst = resolveNested(to, key);
-        for (Map.Entry<String, Object> e : src.entrySet())
-            if (!dst.containsKey(e.getKey())) dst.put(e.getKey(), e.getValue());
-    }
-
-    /* ================================================================== */
-    /*  资源包指纹分配（PackDetector 调用）                                 */
-    /* ================================================================== */
-
-    /**
-     * 确保玩家记录存在且已分配指纹 pack，返回 pack uuid。
-     * 记录不存在时以真实玩家名建空壳（此记录在重连成功前是"空壳"，
-     * 若玩家下次连接时 Xbox 认证状态变化导致 UUID 切换（见 PackDetector），
-     * 需要靠名字找回这条壳记录；带名字的残留也便于人工识别）。
-     */
-    public String ensurePackAssigned(String playerUuidStr, String playerName) {
-        playersConfig.reload();
-        Map<String, Map<String, Object>> players = getPlayers();
-        Map<String, Object> info = players.get(playerUuidStr);
-        if (info == null) {
-            info = newPlayerRecordFor(playerUuidStr);
-            info.put("name", (playerName != null && !playerName.isEmpty()) ? playerName : playerUuidStr);
-            players.put(playerUuidStr, info);
-        }
-        Map<String, Object> pack = resolveNested(info, "pack");
-        Object pu = pack.get("uuid");
-        String newPack = (pu != null && !String.valueOf(pu).isEmpty() && !"null".equalsIgnoreCase(String.valueOf(pu)))
-                ? String.valueOf(pu) : null;
-        if (newPack == null) {
-            newPack = UUID.randomUUID().toString();
-            pack.put("uuid", newPack);
-            playersConfig.set("players", players);
-            playersConfig.save();
-        }
-        return newPack;
-    }
-
-    /* ================================================================== */
-    /*  Blob 指纹落盘（BlobDetector 调用）                                  */
-    /* ================================================================== */
-
-    public void saveBlobIds(Map<String, String> blobIds) {
-        playersConfig.reload();
-        Map<String, Map<String, Object>> players = getPlayers();
-        for (Map.Entry<String, String> e : blobIds.entrySet()) {
-            Map<String, Object> info = players.get(e.getKey());
-            if (info == null) continue;
-            Map<String, Object> blob = resolveNested(info, "blob");
-            blob.put("id", e.getValue());
-        }
-        playersConfig.set("players", players);
-        playersConfig.save();
-    }
-
-    public void saveBlobClaims(Map<String, List<String>> blobClaims) {
-        playersConfig.reload();
-        Map<String, Map<String, Object>> players = getPlayers();
-        for (Map.Entry<String, List<String>> e : blobClaims.entrySet()) {
-            Map<String, Object> info = players.get(e.getKey());
-            if (info == null) continue;
-            Map<String, Object> blob = resolveNested(info, "blob");
-            blob.put("claimed_by", new ArrayList<>(e.getValue()));
-        }
-        playersConfig.set("players", players);
-        playersConfig.save();
-    }
-
-    /* ================================================================== */
-    /*  展示辅助                                                          */
-    /* ================================================================== */
-
-    public String displayName(String uuid) {
-        Map<String, Object> profile = getPlayer(uuid);
-        return profile != null && profile.get("name") != null ? String.valueOf(profile.get("name")) : uuid;
-    }
-
-    /** 展示用的身份串：有 uuid 字段就用它，否则用键本身。 */
-    public String getDisplayIdentifier(String key) {
-        Map<String, Object> info = getPlayer(key);
-        if (info != null) {
-            Object uuid = info.get("uuid");
-            String u = uuid == null ? "" : Uuids.normalize(String.valueOf(uuid));
-            if (Uuids.isUuid(u)) return "uuid: " + u;
-        }
-        return "uuid: " + Uuids.normalize(key);
-    }
-
-    /** 统计全服当前名同名（忽略大小写）的账号数，用于决定 /alias 输出是否需要附带 uuid 消歧。 */
-    public Map<String, Integer> buildNameCollisionMap() {
-        Map<String, Integer> count = new HashMap<>();
-        for (Map<String, Object> info : getPlayers().values()) {
-            Object n = info.get("name");
-            if (n == null) continue;
-            count.merge(String.valueOf(n).toLowerCase(), 1, Integer::sum);
-        }
-        return count;
-    }
-
-    private static boolean isFreshRaw(Map<Object, Object> section, long ttlMs) {
-        Object ts = section.get("ts");
-        if (ts == null) return false;
+    public synchronized void storeIdentifier(String kind, String value, String playerUuid) {
+        if (value == null || value.isEmpty()) return;
+        String key = Uuids.normalize(playerUuid);
+        if (key.isEmpty()) return;
         try {
-            return System.currentTimeMillis() - Long.parseLong(String.valueOf(ts)) <= ttlMs;
-        } catch (NumberFormatException e) {
-            return false;
+            upsertIdentifier(key, kind, value);
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to store identifier: " + key, e);
+        }
+    }
+
+    /** @return true = 本次新增的命中，已存在返回 false */
+    public synchronized boolean addPackClaim(String claimerUuid, String ownerUuid) {
+        String claimer = Uuids.normalize(claimerUuid);
+        String owner = Uuids.normalize(ownerUuid);
+        if (owner.isEmpty() || claimer.isEmpty()) return false;
+        try (PreparedStatement statement = this.connection.prepareStatement(
+                "INSERT INTO pack_claims (owner, claimer) SELECT ?, ?"
+                        + " WHERE NOT EXISTS (SELECT 1 FROM pack_claims WHERE owner = ? AND claimer = ?)")) {
+            statement.setString(1, owner);
+            statement.setString(2, claimer);
+            statement.setString(3, owner);
+            statement.setString(4, claimer);
+            return statement.executeUpdate() > 0;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to add pack claim", e);
+        }
+    }
+
+    /** 包分配结果：fresh=true 表示本次是新随机分配，客户端不可能预先拥有。 */
+    public static final class PackAssignment {
+        public final String packUuid;
+        public final boolean fresh;
+
+        PackAssignment(String packUuid, boolean fresh) {
+            this.packUuid = packUuid;
+            this.fresh = fresh;
+        }
+    }
+
+    /** 分配（或复用）该玩家的指纹包。 */
+    public synchronized PackAssignment ensurePackAssigned(String playerUuid, String playerName) {
+        String key = Uuids.normalize(playerUuid);
+        try {
+            upsertPlayer(key, playerName == null || playerName.isEmpty() ? key : playerName);
+            String existing = readString("SELECT pack_uuid FROM packs WHERE uuid = ?", key);
+            if (existing != null && !existing.isEmpty()) return new PackAssignment(existing, false);
+            String created = UUID.randomUUID().toString();
+            try (PreparedStatement statement = this.connection.prepareStatement(
+                    "MERGE INTO packs (uuid, pack_uuid, confirmed, ts) KEY (uuid) VALUES (?, ?, 0, ?)")) {
+                statement.setString(1, key);
+                statement.setString(2, created);
+                statement.setLong(3, System.currentTimeMillis());
+                statement.executeUpdate();
+            }
+            return new PackAssignment(created, true);
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to assign pack: " + key, e);
+        }
+    }
+
+    public synchronized void markPackConfirmed(String playerUuid) {
+        execute("UPDATE packs SET confirmed = 1 WHERE uuid = ?", Uuids.normalize(playerUuid));
+    }
+
+    public synchronized void markPunished(String playerUuid) {
+        String key = Uuids.normalize(playerUuid);
+        if (key.isEmpty()) return;
+        try (PreparedStatement statement = this.connection.prepareStatement(
+                "MERGE INTO flags (uuid, punished) KEY (uuid) VALUES (?, 1)")) {
+            statement.setString(1, key);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to mark punished: " + key, e);
+        }
+    }
+
+    /** 删掉尚未确认的包分配；没有包记录时返回 false。 */
+    public synchronized boolean removeUnconfirmedPack(String playerUuid) {
+        String key = Uuids.normalize(playerUuid);
+        try (PreparedStatement statement = this.connection.prepareStatement(
+                "DELETE FROM packs WHERE uuid = ? AND confirmed = 0")) {
+            statement.setString(1, key);
+            return statement.executeUpdate() > 0;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to remove pack: " + key, e);
+        }
+    }
+
+    public synchronized void touchPack(String playerUuid) {
+        touch("packs", Uuids.normalize(playerUuid));
+    }
+
+    public synchronized void touchBlob(String playerUuid) {
+        touch("blobs", Uuids.normalize(playerUuid));
+    }
+
+    /** Blob id 表：玩家键 -> blob id（十六进制）。 */
+    public synchronized void saveBlobIds(Map<String, String> blobIds) {
+        try {
+            this.connection.setAutoCommit(false);
+            for (Map.Entry<String, String> entry : blobIds.entrySet()) {
+                try (PreparedStatement statement = this.connection.prepareStatement(
+                        "MERGE INTO blobs (uuid, blob_id) KEY (uuid) VALUES (?, ?)")) {
+                    String key = Uuids.normalize(entry.getKey());
+                    if (key.isEmpty() || entry.getValue() == null) continue;
+                    statement.setString(1, key);
+                    statement.setString(2, entry.getValue());
+                    statement.executeUpdate();
+                }
+            }
+            this.connection.commit();
+        } catch (SQLException | RuntimeException e) {
+            rollbackQuietly();
+            throw new IllegalStateException("Failed to save blob ids", e);
+        } finally {
+            restoreAutoCommit();
+        }
+    }
+
+    /** Blob 命中关系：owner -> [claimer]。 */
+    /** 新增一条指纹命中关系；同一对重复写入是幂等的（MERGE 语义）。 */
+    public synchronized void addBlobClaim(String ownerUuid, String claimerUuid) {
+        String owner = Uuids.normalize(ownerUuid);
+        String claimer = Uuids.normalize(claimerUuid);
+        if (owner.isEmpty() || claimer.isEmpty() || owner.equals(claimer)) return;
+        try (PreparedStatement statement = this.connection.prepareStatement(
+                "MERGE INTO blob_claims (owner, claimer) KEY (owner, claimer) VALUES (?, ?)")) {
+            statement.setString(1, owner);
+            statement.setString(2, claimer);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to add blob claim", e);
+        }
+    }
+
+    /* ================================================================== */
+    /*  内部实现                                                          */
+    /* ================================================================== */
+
+    private Map<String, Object> newRecord(String uuid, Map<String, Object> row) {
+        Map<String, Object> record = new LinkedHashMap<>();
+        record.put("name", row.get("name"));
+        record.put("aliases", new ArrayList<String>());
+        record.put("uuid", uuid);
+        record.put("Punished", false);
+        record.put("ids", new LinkedHashMap<String, Object>());
+        record.put("pack", new LinkedHashMap<String, Object>());
+        record.put("blob", new LinkedHashMap<String, Object>());
+        return record;
+    }
+
+    private void fillAliases(Map<String, Map<String, Object>> records, String only) throws SQLException {
+        String sql = "SELECT uuid, alias_name FROM aliases" + (only == null ? "" : " WHERE uuid = ?");
+        try (PreparedStatement statement = this.connection.prepareStatement(sql)) {
+            if (only != null) statement.setString(1, only);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    Map<String, Object> record = records.get(resultSet.getString(1));
+                    if (record == null) continue;
+                    aliasesOf(record).add(resultSet.getString(2));
+                }
+            }
+        }
+    }
+
+    private void fillIdentifiers(Map<String, Map<String, Object>> records, String only) throws SQLException {
+        String sql = "SELECT uuid, kind, id_value FROM identifiers" + (only == null ? "" : " WHERE uuid = ?");
+        try (PreparedStatement statement = this.connection.prepareStatement(sql)) {
+            if (only != null) statement.setString(1, only);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    Map<String, Object> record = records.get(resultSet.getString(1));
+                    if (record == null) continue;
+                    idsOf(record).put(resultSet.getString(2), resultSet.getString(3));
+                }
+            }
+        }
+    }
+
+    private void fillPacks(Map<String, Map<String, Object>> records, String only) throws SQLException {
+        String sql = "SELECT uuid, pack_uuid, confirmed, ts FROM packs" + (only == null ? "" : " WHERE uuid = ?");
+        try (PreparedStatement statement = this.connection.prepareStatement(sql)) {
+            if (only != null) statement.setString(1, only);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    Map<String, Object> record = records.get(resultSet.getString(1));
+                    if (record == null) continue;
+                    Map<String, Object> pack = packOf(record);
+                    pack.put("uuid", resultSet.getString(2));
+                    pack.put("confirmed", resultSet.getInt(3) != 0);
+                    long ts = resultSet.getLong(4);
+                    if (ts > 0) pack.put("ts", ts);
+                }
+            }
+        }
+        try (PreparedStatement statement = this.connection.prepareStatement(
+                "SELECT owner, claimer FROM pack_claims" + (only == null ? "" : " WHERE owner = ?"))) {
+            if (only != null) statement.setString(1, only);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    Map<String, Object> record = records.get(resultSet.getString(1));
+                    if (record == null) continue;
+                    claimedByOf(packOf(record)).add(resultSet.getString(2));
+                }
+            }
+        }
+    }
+
+    private void fillBlobs(Map<String, Map<String, Object>> records, String only) throws SQLException {
+        String sql = "SELECT uuid, blob_id, ts FROM blobs" + (only == null ? "" : " WHERE uuid = ?");
+        try (PreparedStatement statement = this.connection.prepareStatement(sql)) {
+            if (only != null) statement.setString(1, only);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    Map<String, Object> record = records.get(resultSet.getString(1));
+                    if (record == null) continue;
+                    Map<String, Object> blob = blobOf(record);
+                    blob.put("id", resultSet.getString(2));
+                    long ts = resultSet.getLong(3);
+                    if (ts > 0) blob.put("ts", ts);
+                }
+            }
+        }
+        try (PreparedStatement statement = this.connection.prepareStatement(
+                "SELECT owner, claimer FROM blob_claims" + (only == null ? "" : " WHERE owner = ?"))) {
+            if (only != null) statement.setString(1, only);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    Map<String, Object> record = records.get(resultSet.getString(1));
+                    if (record == null) continue;
+                    claimedByOf(blobOf(record)).add(resultSet.getString(2));
+                }
+            }
+        }
+    }
+
+    private void fillPunished(Map<String, Map<String, Object>> records, String only) throws SQLException {
+        String sql = "SELECT uuid, punished FROM flags" + (only == null ? "" : " WHERE uuid = ?");
+        try (PreparedStatement statement = this.connection.prepareStatement(sql)) {
+            if (only != null) statement.setString(1, only);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    Map<String, Object> record = records.get(resultSet.getString(1));
+                    if (record != null && resultSet.getInt(2) != 0) record.put("Punished", true);
+                }
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> aliasesOf(Map<String, Object> record) {
+        return (List<String>) record.get("aliases");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> idsOf(Map<String, Object> record) {
+        return (Map<String, Object>) record.get("ids");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> packOf(Map<String, Object> record) {
+        return (Map<String, Object>) record.get("pack");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> blobOf(Map<String, Object> record) {
+        return (Map<String, Object>) record.get("blob");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> claimedByOf(Map<String, Object> section) {
+        return (List<String>) section.computeIfAbsent("claimed_by", ignored -> new ArrayList<String>());
+    }
+
+    /** 老版本可能把档案存在别的键下（例如按名字或旧格式），把它的全部关联数据并入当前键。 */
+    private String adoptLegacy(String key) {
+        // 只认壳记录：有包分配但从未完成登录（没有历史名字、没有标识符）。
+        // 有 aliases 说明那个账号真的登录过，同名也只是重名，不是同一个人，不能吞并。
+        String legacy = readString("SELECT p.uuid FROM players p WHERE p.uuid <> ?"
+                + " AND p.name = (SELECT name FROM players WHERE uuid = ?)"
+                + " AND NOT EXISTS (SELECT 1 FROM aliases a WHERE a.uuid = p.uuid)"
+                + " AND NOT EXISTS (SELECT 1 FROM identifiers i WHERE i.uuid = p.uuid)", key, key);
+        if (legacy == null) return null;
+
+        try {
+            this.connection.setAutoCommit(false);
+
+            // 历史名字：并集
+            execute("MERGE INTO aliases KEY (uuid, alias_name)"
+                    + " SELECT ?, alias_name FROM aliases WHERE uuid = ?", key, legacy);
+
+            // 标识符：当前键已有同 kind 的保留自己的，缺的才补
+            execute("INSERT INTO identifiers (uuid, kind, id_value, ts)"
+                    + " SELECT ?, kind, id_value, ts FROM identifiers WHERE uuid = ?"
+                    + " AND kind NOT IN (SELECT kind FROM identifiers WHERE uuid = ?)", key, legacy, key);
+
+            // 一人一条的表：当前键没有记录时才补，别覆盖这次登录刚写下的东西
+            copyIfAbsent("packs", "pack_uuid, confirmed, ts", key, legacy);
+            copyIfAbsent("blobs", "blob_id, ts", key, legacy);
+
+            // 惩罚标记取并集：老记录惩罚过就给当前键补一行，当前键没有行时靠 MERGE 插入
+            execute("MERGE INTO flags KEY (uuid)"
+                    + " SELECT ?, 1 FROM flags WHERE uuid = ? AND punished = 1", key, legacy);
+
+            // 命中关系：owner 和 claimer 两侧都要换键，否则另一头悬空
+            mergeClaims("pack_claims", key, legacy);
+            mergeClaims("blob_claims", key, legacy);
+
+            for (String table : LEGACY_OWNED_TABLES) {
+                execute("DELETE FROM " + table + " WHERE uuid = ?", legacy);
+            }
+            this.connection.commit();
+            return legacy;
+        } catch (SQLException | RuntimeException e) {
+            rollbackQuietly();
+            throw new IllegalStateException("Failed to adopt legacy record: " + key, e);
+        } finally {
+            restoreAutoCommit();
+        }
+    }
+
+    /** 一人一条的表：把老记录的字段补进当前键，当前键已有数据时保留自己的。 */
+    private void copyIfAbsent(String table, String columns, String key, String legacy) {
+        if (!SINGLETON_TABLES.contains(table)) throw new IllegalArgumentException("Unexpected table: " + table);
+        execute("INSERT INTO " + table + " (uuid, " + columns + ")"
+                + " SELECT ?, " + columns + " FROM " + table + " WHERE uuid = ?"
+                + " AND NOT EXISTS (SELECT 1 FROM " + table + " WHERE uuid = ?)", key, legacy, key);
+    }
+
+    /* ================================================================== */
+    /*  封禁记录                                                           */
+    /* ================================================================== */
+
+    /** 记一条封禁记录；同号同来源只保留首次（MERGE），重复触发不会刷出多条。 */
+    public synchronized void recordBan(String playerUuid, String playerName, String source, String triggerUuid) {
+        String key = Uuids.normalize(playerUuid);
+        if (key.isEmpty() || source == null || source.isEmpty()) return;
+        String name = playerName == null ? "" : playerName;
+        String trigger = triggerUuid == null || triggerUuid.isEmpty() ? null : Uuids.normalize(triggerUuid);
+        if (trigger != null && trigger.equals(key)) return;   // 自己触发自己不算株连
+        try (PreparedStatement statement = this.connection.prepareStatement(
+                "MERGE INTO ban_records (uuid, name, source, trigger_uuid, ts) KEY (uuid, source)"
+                        + " VALUES (?, ?, ?, ?, ?)")) {
+            statement.setString(1, key);
+            statement.setString(2, name);
+            statement.setString(3, source);
+            statement.setString(4, trigger);
+            statement.setLong(5, System.currentTimeMillis());
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to record ban: " + key, e);
+        }
+    }
+
+    /** 被连坐封禁的小号数量（主号之外、由关联关系带出来的那些）。 */
+    public synchronized int countRelatedBans() {
+        Long value = readLong("SELECT COUNT(*) FROM ban_records WHERE trigger_uuid IS NOT NULL", new Object[0]);
+        return value == null ? 0 : value.intValue();
+    }
+
+    /**
+     * 被连坐封禁的小号在各维度上的分布。
+     *
+     * <p>前五项是"这个小号身上带有该维度的指纹"，后三项是"这个小号因为哪个检测项被封"。
+     * 同一个小号通常带多个维度，所以各项相加会大于小号数量。
+     */
+    public synchronized Map<String, Integer> countAltDimensions() {
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        for (String dimension : BAN_DIMENSIONS) counts.put(dimension, 0);
+        String alts = "(SELECT uuid FROM ban_records WHERE trigger_uuid IS NOT NULL)";
+
+        for (String kind : ALT_IDENTIFIER_DIMENSIONS) {
+            Long value = readLong("SELECT COUNT(DISTINCT uuid) FROM identifiers WHERE kind = ? AND uuid IN " + alts, kind);
+            counts.put(kind, value == null ? 0 : value.intValue());
+        }
+        Long packs = readLong("SELECT COUNT(DISTINCT uuid) FROM packs WHERE uuid IN " + alts, new Object[0]);
+        counts.put("ResourcePackCache", packs == null ? 0 : packs.intValue());
+        for (String source : ALT_BAN_SOURCES) {
+            // 旧库里来源名是 DeviceIdFormat，改名后要一并认，否则历史封禁记录会在 -stats 里凭空消失
+            Long value = "IdFormat".equals(source)
+                    ? readLong("SELECT COUNT(*) FROM ban_records WHERE source IN ('IdFormat', 'DeviceIdFormat') AND trigger_uuid IS NOT NULL", new Object[0])
+                    : readLong("SELECT COUNT(*) FROM ban_records WHERE source = ? AND trigger_uuid IS NOT NULL", source);
+            counts.put(source, value == null ? 0 : value.intValue());
+        }
+        return counts;
+    }
+
+    /** 命中关系表：老键在两侧都换成当前键，再清掉老键的行。 */
+    private void mergeClaims(String table, String key, String legacy) {
+        if (!CLAIM_TABLES.contains(table)) throw new IllegalArgumentException("Unexpected table: " + table);
+        // 老键作为 owner 的那些命中（claimer 已经是当前键的会自命中，排除）
+        execute("MERGE INTO " + table + " KEY (owner, claimer)"
+                + " SELECT ?, claimer FROM " + table + " WHERE owner = ? AND claimer <> ?", key, legacy, key);
+        // 老键作为 claimer 的那些命中；owner 为当前键的行是上一步插进来的，排除掉防止自命中
+        execute("MERGE INTO " + table + " KEY (owner, claimer)"
+                + " SELECT owner, ? FROM " + table + " WHERE claimer = ? AND owner <> ?", key, legacy, key);
+        execute("DELETE FROM " + table + " WHERE owner = ? OR claimer = ?", legacy, legacy);
+    }
+
+    private void upsertPlayer(String key, String name) {
+        // 建档时间只在第一次写入，之后每次登录只更新名字
+        execute("INSERT INTO players (uuid, name, created_at) SELECT ?, ?, ?"
+                + " WHERE NOT EXISTS (SELECT 1 FROM players WHERE uuid = ?)",
+                key, name, System.currentTimeMillis(), key);
+        execute("UPDATE players SET name = ? WHERE uuid = ?", name, key);
+    }
+
+    private void insertAlias(String key, String alias) throws SQLException {
+        try (PreparedStatement statement = this.connection.prepareStatement(
+                "MERGE INTO aliases (uuid, alias_name) KEY (uuid, alias_name) VALUES (?, ?)")) {
+            statement.setString(1, key);
+            statement.setString(2, alias);
+            statement.executeUpdate();
+        }
+    }
+
+    private void upsertIdentifier(String key, String kind, String value) throws SQLException {
+        if (kind == null || kind.isEmpty() || value == null || value.isEmpty()) return;
+        if (key.isEmpty()) return;
+        if (kind.length() > IDENTIFIER_KIND_MAX_LENGTH || value.length() > IDENTIFIER_VALUE_MAX_LENGTH) return;
+        try (PreparedStatement statement = this.connection.prepareStatement(
+                "MERGE INTO identifiers (uuid, kind, id_value, ts) KEY (uuid, kind) VALUES (?, ?, ?, ?)")) {
+            statement.setString(1, key);
+            statement.setString(2, kind);
+            statement.setString(3, value);
+            statement.setLong(4, System.currentTimeMillis());
+            statement.executeUpdate();
+        }
+    }
+
+    /** 写盘节流：一小时内重复刷新不落盘。 */
+    private void touch(String table, String key) {
+        try {
+            Long current = readLong("SELECT ts FROM " + table + " WHERE uuid = ?", key);
+            if (current == null) return;
+            long now = System.currentTimeMillis();
+            if (current > 0 && now - current < TOUCH_INTERVAL_MS) return;
+            try (PreparedStatement statement = this.connection.prepareStatement(
+                    "UPDATE " + table + " SET ts = ? WHERE uuid = ?")) {
+                statement.setLong(1, now);
+                statement.setString(2, key);
+                statement.executeUpdate();
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to touch " + table + ": " + key, e);
+        }
+    }
+
+    private boolean readFlag(String sql, String key) {
+        Long value = readLong(sql, key);
+        return value != null && value != 0;
+    }
+
+    private Long readLong(String sql, Object... params) {
+        try (PreparedStatement statement = this.connection.prepareStatement(sql)) {
+            bind(statement, params);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) return null;
+                long value = resultSet.getLong(1);
+                return resultSet.wasNull() ? null : value;
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Query failed: " + sql, e);
+        }
+    }
+
+    private String readString(String sql, Object... params) {
+        try (PreparedStatement statement = this.connection.prepareStatement(sql)) {
+            bind(statement, params);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? resultSet.getString(1) : null;
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Query failed: " + sql, e);
+        }
+    }
+
+    private void execute(String sql, Object... params) {
+        try (PreparedStatement statement = this.connection.prepareStatement(sql)) {
+            bind(statement, params);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Update failed: " + sql, e);
+        }
+    }
+
+    private List<Map<String, Object>> query(String sql, Object... params) throws SQLException {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        try (PreparedStatement statement = this.connection.prepareStatement(sql)) {
+            bind(statement, params);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                int columns = resultSet.getMetaData().getColumnCount();
+                while (resultSet.next()) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    for (int i = 1; i <= columns; i++) {
+                        row.put(resultSet.getMetaData().getColumnLabel(i).toLowerCase(), resultSet.getObject(i));
+                    }
+                    rows.add(row);
+                }
+            }
+        }
+        return rows;
+    }
+
+    private List<Map<String, Object>> queryAll(String sql) throws SQLException {
+        return query(sql);
+    }
+
+    private static void bind(PreparedStatement statement, Object... params) throws SQLException {
+        for (int i = 0; i < params.length; i++) {
+            statement.setObject(i + 1, params[i]);
+        }
+    }
+
+    private void rollbackQuietly() {
+        try {
+            this.connection.rollback();
+        } catch (SQLException ignored) {
+            // 事务已失效，无法补救
+        }
+    }
+
+    private void restoreAutoCommit() {
+        try {
+            this.connection.setAutoCommit(true);
+        } catch (SQLException ignored) {
+            // 同上
         }
     }
 }

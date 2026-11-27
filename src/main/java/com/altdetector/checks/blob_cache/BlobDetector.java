@@ -1,4 +1,6 @@
-package com.altdetector.detection;
+package com.altdetector.checks.blob_cache;
+
+import com.altdetector.punish.PunishManager;
 
 import cn.nukkit.Player;
 import cn.nukkit.event.EventHandler;
@@ -21,13 +23,12 @@ import cn.nukkit.network.protocol.types.SubChunkRequestResult;
 import cn.nukkit.scheduler.TaskHandler;
 import com.altdetector.AltDetector;
 import com.altdetector.util.Uuids;
-import com.altdetector.protocol.ClientCacheBlobStatusPacket;
-import com.altdetector.protocol.ClientCacheMissResponsePacket;
+import com.altdetector.checks.blob_cache.protocol.ClientCacheBlobStatusPacket;
+import com.altdetector.checks.blob_cache.protocol.ClientCacheMissResponsePacket;
 import com.altdetector.store.PlayerStore;
 import com.altdetector.util.XxHash64;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -79,30 +80,29 @@ public class BlobDetector implements Listener {
     private final AltDetector plugin;
     private final PlayerStore store;
 
-    private Map<String, String> blobIds = new LinkedHashMap<>();
+    private Map<String, String> blobIds = new ConcurrentHashMap<>();
     private Map<String, List<String>> blobClaims = new LinkedHashMap<>();
-    private final Map<UUID, byte[]> blobData = new HashMap<>();
+    private final Map<UUID, byte[]> blobData = new ConcurrentHashMap<>();
     /** blobId → 指纹主人的 uuid。 */
-    private final Map<Long, String> blobOwners = new HashMap<>();
-    private final Map<UUID, Set<Long>> pendingProbe = new HashMap<>();
-    private final Map<UUID, Set<Long>> pendingChunks = new HashMap<>();
+    private final Map<Long, String> blobOwners = new ConcurrentHashMap<>();
+    private final Map<UUID, Set<Long>> pendingProbe = new ConcurrentHashMap<>();
+    private final Map<UUID, Set<Long>> pendingChunks = new ConcurrentHashMap<>();
     private final Map<UUID, Boolean> cacheSupported = new ConcurrentHashMap<>();
     private final Map<Player, Boolean> preLoginSupported = java.util.Collections.synchronizedMap(new WeakHashMap<>());
     private final Set<UUID> cacheStatusSent = ConcurrentHashMap.newKeySet();
     private final Set<UUID> fullScanPending = ConcurrentHashMap.newKeySet();
-    private final Map<UUID, TaskHandler> scanTimeouts = new HashMap<>();
+    private final Map<UUID, TaskHandler> scanTimeouts = new ConcurrentHashMap<>();
     /** 扫描中命中已惩罚账号指纹的账号：扫描结束（finishScan）后统一惩罚。 */
-    private final Set<String> autoPunishPending = new HashSet<>();
-
-    private long statProbesSent;
-    private long statHits;
-    private long statMisses;
-    private long statClaimsFound;
-    private long statSkippedUnsupported;
+    private final Set<String> autoPunishPending = ConcurrentHashMap.newKeySet();
 
     public BlobDetector(AltDetector plugin, PlayerStore store) {
         this.plugin = plugin;
         this.store = store;
+    }
+
+    /** BlobCache 排查日志。仅当 config 里 debug.blobcache=true 时输出。 */
+    private void debug(String message) {
+        if (plugin.blobDebugEnabled()) plugin.getLogger().info("[blob-debug] " + message);
     }
 
     /* ================================================================== */
@@ -120,15 +120,20 @@ public class BlobDetector implements Listener {
     }
 
     public void loadData() {
-        this.blobIds = new LinkedHashMap<>();
+        this.blobIds = new ConcurrentHashMap<>();
         this.blobClaims = new LinkedHashMap<>();
+        long ttl = this.plugin.getBlobExpireMs();
+        long now = System.currentTimeMillis();
         for (Map.Entry<String, Map<String, Object>> pe : store.getPlayers().entrySet()) {
             String uuid = pe.getKey();
-            Map<String, Object> blob = PlayerStore.asMap(pe.getValue().get("blob"));
+            Object blobRaw = pe.getValue().get("blob");
+            if (!(blobRaw instanceof Map)) continue;
+            @SuppressWarnings("unchecked")
+            Map<String, Object> blob = (Map<String, Object>) blobRaw;
             if (blob == null) continue;
             Object idObj = blob.get("id");
             if (idObj != null && !String.valueOf(idObj).isEmpty() && !"null".equalsIgnoreCase(String.valueOf(idObj))) {
-                if (!this.store.isBlobFresh(uuid, this.plugin.getBlobExpireMs())) continue;   // 过期的不参与检测
+                if (!isFreshTs(blob.get("ts"), ttl, now)) continue;   // 过期的不参与检测
                 this.blobIds.put(uuid, String.valueOf(idObj));
             }
             Object cb = blob.get("claimed_by");
@@ -150,11 +155,22 @@ public class BlobDetector implements Listener {
         }
     }
 
-    /** 从 players.yml 重载 claim 内存副本：键改名后 store 里引用已重写，内存不重载会把它覆盖回去。 */
+    /** 直接用查询结果里的时间戳判断新鲜度，省掉每个玩家一次单独查询。 */
+    private static boolean isFreshTs(Object tsRaw, long ttlMs, long now) {
+        if (ttlMs <= 0) return true;
+        if (!(tsRaw instanceof Number)) return false;
+        long ts = ((Number) tsRaw).longValue();
+        return ts > 0 && now - ts <= ttlMs;
+    }
+
+    /** 从数据库重载 claim 内存副本：键改名后 store 里引用已重写，内存不重载会把它覆盖回去。 */
     public void reloadClaims() {
         Map<String, List<String>> claims = new LinkedHashMap<>();
         for (Map.Entry<String, Map<String, Object>> pe : store.getPlayers().entrySet()) {
-            Map<String, Object> blob = PlayerStore.asMap(pe.getValue().get("blob"));
+            Object blobRaw = pe.getValue().get("blob");
+            if (!(blobRaw instanceof Map)) continue;
+            @SuppressWarnings("unchecked")
+            Map<String, Object> blob = (Map<String, Object>) blobRaw;
             if (blob == null) continue;
             Object cb = blob.get("claimed_by");
             if (!(cb instanceof List)) continue;
@@ -173,6 +189,7 @@ public class BlobDetector implements Listener {
     public void onJoin(PlayerJoinEvent event) {
         if (!plugin.blobEnabled()) return;
         Player player = event.getPlayer();
+        this.debug("join " + player.getName() + " 开始 BlobCache 检测");
         Boolean early = this.preLoginSupported.remove(player);
         if (early != null) {
             this.cacheSupported.put(player.getUniqueId(), early);
@@ -191,6 +208,7 @@ public class BlobDetector implements Listener {
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
         UUID uuid = event.getPlayer().getUniqueId();
+        this.debug("quit " + event.getPlayer().getName());
         pendingProbe.remove(uuid);
         pendingChunks.remove(uuid);
         cacheSupported.remove(uuid);
@@ -207,6 +225,7 @@ public class BlobDetector implements Listener {
 
         if (packet instanceof ClientCacheStatusPacket) {
             boolean supported = ((ClientCacheStatusPacket) packet).supported;
+            this.debug("收到缓存状态包 " + player.getName() + " supported=" + supported);
             if (player.loggedIn || player.spawned) {
                 this.cacheSupported.put(player.getUniqueId(), supported);
             } else {
@@ -250,6 +269,7 @@ public class BlobDetector implements Listener {
         UUID uuid = player.getUniqueId();
 
         if (!player.isConnected()) {
+            this.debug("scan " + player.getName() + " 已断开，终止");
             this.finishScan(uuid);
             return;
         }
@@ -262,30 +282,31 @@ public class BlobDetector implements Listener {
             return;
         }
         if (!player.spawned || player.protocol < MIN_BLOB_PROTOCOL) {
-            this.statSkippedUnsupported++;
+            this.debug("scan " + player.getName() + " 未生成或协议过低 protocol=" + player.protocol + "，跳过");
             this.finishScan(uuid);
             return;
         }
 
         Boolean supported = this.cacheSupported.get(uuid);
         if (supported == null) {
+            this.debug("scan " + player.getName() + " 等待缓存状态包 attempt=" + attempt);
             if (attempt < 10) {
                 plugin.getServer().getScheduler().scheduleDelayedTask(plugin, () -> {
                     if (player.isConnected() && player.spawned) this.scanPlayer(player, attempt + 1);
                     else this.finishScan(uuid);
                 }, 20);
             } else {
-                this.statSkippedUnsupported++;
                 this.finishScan(uuid);
             }
             return;
         }
         if (!supported) {
-            this.statSkippedUnsupported++;
+            this.debug("scan " + player.getName() + " 客户端不支持缓存，跳过");
             this.finishScan(uuid);
             return;
         }
         if (player.getLevel() == null || player.getLevel().getDimension() != Level.DIMENSION_OVERWORLD) {
+            this.debug("scan " + player.getName() + " 不在主世界，跳过");
             this.finishScan(uuid);
             return;
         }
@@ -302,6 +323,7 @@ public class BlobDetector implements Listener {
             Long id = this.parseBlobId(this.blobIds.get(other));
             if (id != null && !ids.contains(id)) ids.add(id);
         }
+        this.debug("scan " + player.getName() + " 探测指纹数=" + ids.size() + " ownId=" + Long.toHexString(ownId));
 
         if (this.cacheStatusSent.add(uuid)) {
             ClientCacheStatusPacket enable = new ClientCacheStatusPacket();
@@ -338,10 +360,11 @@ public class BlobDetector implements Listener {
         if (!this.fullScanPending.remove(uuid)) return;
         TaskHandler timeout = this.scanTimeouts.remove(uuid);
         if (timeout != null) timeout.cancel();
+        this.debug("finishScan uuid=" + uuid + " 待惩罚账号=" + this.autoPunishPending.size());
 
         // 检测结束：统一处理扫描期间登记的自动惩罚（此时全部 claim 已落盘，
         // punish 收集关联账号时不会漏掉本轮扫描的后发现的命中）
-        for (String claimer : this.autoPunishPending) plugin.punish(claimer);
+        for (String claimer : this.autoPunishPending) plugin.punish(claimer, PunishManager.SOURCE_BLOB_CACHE);
         this.autoPunishPending.clear();
     }
 
@@ -354,9 +377,10 @@ public class BlobDetector implements Listener {
         int base = Math.abs(uuid.hashCode());
         int bx = PROBE_CHUNK_BASE + (base & 0xFFFF);
         int bz = PROBE_CHUNK_BASE + ((base >>> 16) & 0xFFFF);
+        this.debug("probe " + player.getName() + " 指纹数=" + ids.size() + " 区块基址=(" + bx + "," + bz + ")");
 
-        Set<Long> pending = new HashSet<>();
-        Set<Long> chunks = new HashSet<>();
+        Set<Long> pending = ConcurrentHashMap.newKeySet();
+        Set<Long> chunks = ConcurrentHashMap.newKeySet();
         for (long h : NEG_BLOB_HASHES) pending.add(h);
 
         // 合并探测：一个 cacheEnabled 区块可引用多个 blob（blobIds = subChunkCount 个
@@ -385,9 +409,9 @@ public class BlobDetector implements Listener {
                 pk.blobIds = blobIds;
                 pk.data = new byte[]{0};
                 player.dataPacket(pk);
+                this.debug("  发送探测包 cx=" + cx + " cz=" + cz + " 含指纹 " + batch.size() + " 个");
                 for (long fp : batch) pending.add(fp);
                 chunks.add(chunkKey(cx, cz));
-                this.statProbesSent++;
             } catch (Exception e) {
                 plugin.getLogger().warning("Failed to send blob probe chunk: " + e);
             }
@@ -402,6 +426,7 @@ public class BlobDetector implements Listener {
         String identityKey = Uuids.keyOf(player);
         Set<Long> pending = this.pendingProbe.get(uuid);
         if (pending == null || pending.isEmpty()) return;
+        this.debug("收到 blob 响应 " + player.getName() + " miss=" + status.missIds.length + " hit=" + status.hitIds.length + " 待确认=" + pending.size());
 
         ClientCacheMissResponsePacket missResponse = null;
         for (long id : status.missIds) {
@@ -414,7 +439,6 @@ public class BlobDetector implements Listener {
             if (data == null) continue;
             if (missResponse == null) missResponse = new ClientCacheMissResponsePacket();
             missResponse.blobs.put(id, data);
-            this.statMisses++;
         }
         if (missResponse != null) {
             player.dataPacket(missResponse);
@@ -424,8 +448,8 @@ public class BlobDetector implements Listener {
             if (!pending.contains(id)) continue;
             String owner = this.blobOwners.get(id);
             if (owner == null) continue; // 共享负段 hit：仅说明设备玩过本服，与小号判断无关，静默跳过
-            this.statHits++;
             if (owner.equals(identityKey)) continue;
+                this.debug("  命中指纹 owner=" + owner + " → 连坐 " + identityKey);
             this.addBlobClaim(owner, identityKey, player);
         }
 
@@ -476,7 +500,10 @@ public class BlobDetector implements Listener {
         String key = Uuids.normalize(ownerKey);
         String hex = this.blobIds.get(key);
         Long id = hex != null ? this.parseBlobId(hex) : null;
-        if (id != null) return id;
+        if (id != null) {
+            this.debug("ensureBlob " + key + " 复用已有指纹 " + Long.toHexString(id));
+            return id;
+        }
         UUID identity = Uuids.blobIdentity(key);
         byte[] data = this.buildBiomeBlob(identity);
         long newId = XxHash64.hash(data, 0L);
@@ -484,6 +511,7 @@ public class BlobDetector implements Listener {
         this.blobData.put(identity, data);
         this.blobOwners.put(newId, key);
         this.store.saveBlobIds(this.blobIds);
+        this.debug("ensureBlob " + key + " 新生成指纹 " + Long.toHexString(newId));
         return newId;
     }
 
@@ -515,13 +543,21 @@ public class BlobDetector implements Listener {
 
     private void addBlobClaim(String ownerKey, String claimerKey, Player claimerPlayer) {
         List<String> list = this.blobClaims.computeIfAbsent(ownerKey, k -> new ArrayList<>());
-        if (list.contains(claimerKey)) return;
+        if (list.contains(claimerKey)) {
+            this.debug("claim 重复 owner=" + ownerKey + " claimer=" + claimerKey + " 已存在");
+            return;
+        }
         list.add(claimerKey);
-        this.statClaimsFound++;
-        this.store.saveBlobClaims(this.blobClaims);
+        this.store.addBlobClaim(ownerKey, claimerKey);
+        this.debug("claim 记录 owner=" + ownerKey + " claimer=" + claimerKey);
         // 命中已惩罚账号的指纹（同设备）：先登记，扫描结束（finishScan）后统一惩罚，
         // 确保惩罚时本次检测的全部 claim 已落盘
-        if (plugin.isPunished(ownerKey)) this.autoPunishPending.add(claimerKey);
+        // owner 被封过、且 claimer 自己还没被封，才需要补一次；
+        // 已封禁的 claimer 反复进服会重复排队，日志里刷一堆重复惩罚
+        if (plugin.isPunished(ownerKey) && !plugin.isPunished(claimerKey)) {
+            this.debug("owner " + ownerKey + " 已封禁，登记待惩罚 " + claimerKey);
+            this.autoPunishPending.add(claimerKey);
+        }
     }
 
     /**

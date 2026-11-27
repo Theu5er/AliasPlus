@@ -1,6 +1,10 @@
+# 玩家数据库文件名，位于插件目录下；扩展名由 H2 自行添加
+storage:
+  file: "aliasdb"
+
 checks:
   DeviceId: true
-  DeviceIdFormat: true
+  IdFormat: true
   SelfSignedId: true
   ClientRandomId: true
   NetworkID: true       # 仅当客户端支持 NetherNet 且服务端启用 NetherNet 时有效
@@ -26,6 +30,10 @@ strictmode: true
 # 实践中影响不大：除非关闭严格模式，关联是单向的；伪造命中最终只会封掉伪造者自己，
 # 或者一个已经被封禁的账号。想栽赃别人也做不到。
 
+
+# 排查日志开关，仅在排障时打开
+debug:
+  blobcache: false
 punish:
   # %player% = 玩家名，%uuid% = 玩家 uuid
-  command: "ban %player% Alt account detected"
+  command: "ban %player% test"
