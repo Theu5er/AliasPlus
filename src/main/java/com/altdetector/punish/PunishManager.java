@@ -3,8 +3,6 @@ package com.altdetector.punish;
 import com.altdetector.AltDetector;
 import com.altdetector.store.PlayerStore;
 import com.altdetector.util.Uuids;
-import cn.nukkit.command.ConsoleCommandSender;
-import cn.nukkit.lang.TextContainer;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -42,26 +40,6 @@ public class PunishManager {
     private final List<PendingPunish> pending = new ArrayList<>();
     /** 已在队列中的账号，防止重复惩罚。 */
     private final Set<String> pendingUuids = new HashSet<>();
-    /** 静默执行者：惩罚命令照常执行，但不把命令的成功回显打到控制台。 */
-    private final SilentSender silentSender = new SilentSender();
-
-    /**
-     * 吞掉命令回显的 console 执行者。原版命令执行完会通过 sender.sendMessage 回显成功提示，
-     * 自动封禁一秒一个玩家会把控制台刷满，这里两个重载都丢弃。
-     *
-     * <p>拦不住命令或插件绕过 sender 直接写 logger 的情况。
-     */
-    private static final class SilentSender extends ConsoleCommandSender {
-        @Override
-        public void sendMessage(String message) {
-            // 故意丢弃
-        }
-
-        @Override
-        public void sendMessage(TextContainer message) {
-            // 故意丢弃
-        }
-    }
 
     private static final class PendingPunish {
         final String uuid;
@@ -164,7 +142,7 @@ public class PunishManager {
                 .replace("%uuid%", store.uuidOf(p.uuid));
         boolean ok;
         try {
-            ok = plugin.getServer().getCommandMap().dispatch(silentSender, cmd);
+            ok = plugin.getServer().dispatchCommand(plugin.getServer().getConsoleSender(), cmd);
         } catch (Exception e) {
             plugin.getLogger().warning("Punish command failed (" + p.uuid + "): " + e);
             return;
